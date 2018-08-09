@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# vim: sw=4:ts=4:et
+
 import json
 import logging
 import os
@@ -7,11 +10,10 @@ import re
 from subprocess import Popen, PIPE
 
 # requires python-yara version 3.4
-# TODO check for version?
 import yara
 
 # hey look at this trickery
-logging = logging.getLogger('yara-scanner')
+#logging = logging.getLogger('yara-scanner')
 
 def get_current_repo_commit(repo_dir):
     """Utility function to return the current commit hash for a given repo directory.  Returns None on failure."""
@@ -185,7 +187,8 @@ class YaraScanner(object):
 
         # get the list of all the files to compile
         all_files = {} # key = "namespace", value = [] of file_paths
-        all_files[''] = self.tracked_files.keys()
+        # XXX there's a bug in yara where using an empty string as the namespace causes a segfault
+        all_files['DEFAULT'] = self.tracked_files.keys()
         for dir_path in self.tracked_dirs.keys():
             all_files[dir_path] = self.tracked_dirs[dir_path]
 
@@ -204,6 +207,7 @@ class YaraScanner(object):
                     data = fp.read()
 
                     try:
+                        logging.debug("compiling ...")
                         yara.compile(source=data)
                         rule_count += 1
                     except Exception as e:
@@ -790,3 +794,111 @@ def send_data_block(s, data):
 def send_block0(s):
     """Writes an empty data block to the given socket."""
     send_data_block(s, b'')
+
+def main():
+    import argparse
+    import pprint
+    import sys
+
+    #from yara_scanner import YaraScanner, YaraJSONEncoder
+
+    parser = argparse.ArgumentParser(description="Scan the given file with yara using all available rulesets.")
+    parser.add_argument('paths', metavar='PATHS', nargs="*",
+        help="One or more files or directories to scan with yara.")
+    parser.add_argument('-r', '--recursive', required=False, default=False, action='store_true', dest='recursive',
+        help="Recursively scan directories.")
+    parser.add_argument('--from-stdin', required=False, default=False, action='store_true', dest='from_stdin',
+        help="Read the list of files to scan from stdin.")
+
+    parser.add_argument('--debug', dest='log_debug', default=False, action='store_true',
+        help="Log debug level messages.")
+    parser.add_argument('-j', '--dump-json', required=False, default=False, action='store_true', dest='dump_json',
+        help="Dump JSON details of matches.  Otherwise just list the rules that hit.")
+
+    parser.add_argument('-y', '--yara-rules', required=False, default=[], action='append', dest='yara_rules',
+        help="One yara rule to load.  You can specify more than one of these.")
+    parser.add_argument('-Y', '--yara-dirs', required=False, default=[], action='append', dest='yara_dirs',
+        help="One directory containing yara rules to load.  You can specify more than one of these.")
+    parser.add_argument('-G', '--yara-repos', required=False, default=[], action='append', dest='yara_repos',
+        help="One directory that is a git repository that contains yara rules to load. You can specify more than one of these.")
+    parser.add_argument('-c', '--compile-only', required=False, default=False, action='store_true', dest='compile_only',
+        help="Compile the rules and exit.")
+    parser.add_argument('-b', '--blacklist', required=False, default=[], action='append', dest='blacklisted_rules',
+        help="A rule to blacklist (remove from the results.)  You can specify more than one of these options.")
+    parser.add_argument('-B', '--blacklist-path', required=False, default=None, dest='blacklisted_rules_path',
+        help="Path to a file that contains a list of rules to blacklist, one per line.")
+
+    parser.add_argument('-d', '--signature-dir', dest='signature_dir', default=None,
+        help="DEPRECATED: Use a different signature directory than the default.")
+
+    args = parser.parse_args()
+
+    if len(args.yara_rules) == 0 and len(args.yara_dirs) == 0 and len(args.yara_repos) == 0 and args.signature_dir is None:
+        args.signature_dir = '/opt/signatures'
+
+    logging.basicConfig(level=logging.DEBUG if args.log_debug else logging.WARNING)
+
+    # load any blacklisting
+    if args.blacklisted_rules_path is not None:
+        with open(args.blacklisted_rules_path, 'r') as fp:
+            args.blacklisted_rules.extend([x.strip() for x in fp.read().split('\n')])
+
+    scanner = YaraScanner(signature_dir=args.signature_dir)
+    scanner.blacklist = args.blacklisted_rules
+    for file_path in args.yara_rules:
+        scanner.track_yara_file(file_path)
+
+    for dir_path in args.yara_dirs:
+        scanner.track_yara_dir(dir_path)
+
+    for repo_path in args.yara_repos:
+        scanner.track_yara_repository(repo_path)
+
+    scanner.load_rules()
+
+    if scanner.check_rules():
+        scanner.load_rules()
+
+    if args.compile_only:
+        sys.exit(0)
+
+    exit_result = 0
+
+    def scan_file(file_path):
+        global exit_result
+        try:
+            if scanner.scan(file_path):
+                if args.dump_json:
+                    json.dump(scanner.scan_results, sys.stdout, sort_keys=True, indent=4, cls=YaraJSONEncoder)
+                else:
+                    print(file_path)
+                    for match in scanner.scan_results:
+                        print('\t{0}'.format(match['rule']))
+        except Exception as e:
+            logging.error("scan failed for {}: {}".format(file_path, e))
+            exit_result = 1
+
+    def scan_dir(dir_path):
+        for file_path in os.listdir(dir_path):
+            file_path = os.path.join(dir_path, file_path)
+            if os.path.isdir(file_path):
+                if args.recursive:
+                    scan_dir(file_path)
+            else:
+                scan_file(file_path)
+
+    if args.from_stdin:
+        for line in sys.stdin:
+            line = line.strip()
+            scan_file(line)
+    else:
+        for path in args.paths:
+            if os.path.isdir(path):
+                scan_dir(path)
+            else:
+                scan_file(path)
+
+    sys.exit(exit_result)
+
+if __name__ == '__main__':
+    main()
