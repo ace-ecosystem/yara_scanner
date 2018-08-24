@@ -14,7 +14,7 @@ from setuptools import setup
 from codecs import open
 from os import path
 
-__version__ = "1.0.0"
+__version__ = "1.0.4"
 description = "A Python wrapper library for libyara and a local server for " \
               "fully utilizing the CPUs of the system to scan with yara."
 
@@ -84,7 +84,7 @@ setup(
 
     # Alternatively, if you want to distribute just a my_module.py, uncomment
     # this:
-    py_modules=["yara_scanner"],
+    py_modules=["yara_scanner", "yss", "ysc", "ansistrm"],
 
     # List run-time dependencies here.  These will be installed by pip when
     # your project is installed. For an analysis of "install_requires" vs pip's
@@ -95,8 +95,8 @@ setup(
     entry_points={
         'console_scripts': [
             'scan=yara_scanner:main',
-            'yss=yss:__main__',
-            'ysc=ysc:__main__',
+            'yss=yss:main',
+            'ysc=ysc:main',
         ],
     }
 )

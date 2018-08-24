@@ -23,7 +23,7 @@ def main():
             args.files.append(line)
 
     for _file in args.files:
-        scan_results = scan_file(_file)
+        scan_results = scan_file(_file, base_dir=args.base_dir)
         if not scan_results:
             print("{}: no matches".format(_file))
         else:
