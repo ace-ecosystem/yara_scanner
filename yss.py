@@ -160,7 +160,7 @@ def main():
     sigterm = False
 
     def handler(signum, frame):
-        global sigterm
+        nonlocal sigterm
         sigterm = True
 
     signal.signal(signal.SIGTERM, handler)

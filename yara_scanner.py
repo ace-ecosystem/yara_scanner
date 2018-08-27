@@ -13,7 +13,7 @@ from subprocess import Popen, PIPE
 import yara
 
 # hey look at this trickery
-#logging = logging.getLogger('yara-scanner')
+logging = logging.getLogger('yara-scanner')
 
 def get_current_repo_commit(repo_dir):
     """Utility function to return the current commit hash for a given repo directory.  Returns None on failure."""
@@ -506,6 +506,8 @@ class YaraScannerServer(object):
                 logging.info("waiting for scanner {} to exit...".format(server.pid))
                 server.join()
 
+        logging.info("exiting")
+
     def execute_process_manager(self):
         for i, p in enumerate(self.servers):
             if self.servers[i] is not None:
@@ -621,6 +623,7 @@ class YaraScannerServer(object):
 
         # get the next client connection
         try:
+            logging.debug("waiting for client")
             client_socket, _ = self.server_socket.accept()
         except socket.timeout as e:
             # nothing came in while we were waiting (check for shutdown and try again)
