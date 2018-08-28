@@ -12,9 +12,6 @@ from subprocess import Popen, PIPE
 # requires python-yara version 3.4
 import yara
 
-# hey look at this trickery
-logging = logging.getLogger('yara-scanner')
-
 def get_current_repo_commit(repo_dir):
     """Utility function to return the current commit hash for a given repo directory.  Returns None on failure."""
     p = Popen(['git', '-C', repo_dir, 'log', '-n', '1', '--format=oneline'], stdout=PIPE, stderr=PIPE, universal_newlines=True)
@@ -905,3 +902,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+else:
+    logging = logging.getLogger('yara-scanner')
