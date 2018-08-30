@@ -11,6 +11,9 @@ from subprocess import Popen, PIPE
 
 # requires python-yara version 3.4
 import yara
+yara.set_config(max_strings_per_rule=30720)
+
+log = logging.getLogger('yara-scanner')
 
 def get_current_repo_commit(repo_dir):
     """Utility function to return the current commit hash for a given repo directory.  Returns None on failure."""
@@ -19,10 +22,10 @@ def get_current_repo_commit(repo_dir):
     p.wait()
 
     if len(stderr.strip()) > 0:
-        logging.error("git reported an error: {0}".format(stderr.strip()))
+        log.error("git reported an error: {0}".format(stderr.strip()))
 
     if len(commit) < 40:
-        logging.error("got {0} for stdout with git log".format(commit.strip()))
+        log.error("got {0} for stdout with git log".format(commit.strip()))
         return None
 
     return commit[0:40]
@@ -53,10 +56,10 @@ class YaraScanner(object):
 
         # both parameters to this function are for backwards compatibility
         if thread_count is not None:
-            logging.warning("thread_count is no longer used in YaraScanner.__init__")
+            log.warning("thread_count is no longer used in YaraScanner.__init__")
         
         if signature_dir is not None:
-            #logging.warning("using old signature_dir parameter to YaraScanner.__init__")
+            #log.warning("using old signature_dir parameter to YaraScanner.__init__")
             # in the old system a single directory containing yara rule sub directories was used
             for dir_path in os.listdir(signature_dir):
                 dir_path = os.path.join(signature_dir, dir_path)
@@ -88,12 +91,12 @@ class YaraScanner(object):
         else:
             self.tracked_files[file_path] = os.path.getmtime(file_path)
 
-        logging.debug("yara file {0} tracked @ {1}".format(file_path, self.tracked_files[file_path]))
+        log.debug("yara file {0} tracked @ {1}".format(file_path, self.tracked_files[file_path]))
 
     def track_yara_dir(self, dir_path):
         """Adds all files in a given directory that end with .yar when converted to lowercase.  All files are monitored for changes to mtime, as well as new and removed files."""
         if not os.path.isdir(dir_path):
-            logging.error("{0} is not a directory".format(dir_path))
+            log.error("{0} is not a directory".format(dir_path))
             return
 
         self.tracked_dirs[dir_path] = {}
@@ -102,23 +105,23 @@ class YaraScanner(object):
             file_path = os.path.join(dir_path, file_path)
             if file_path.lower().endswith('.yar'):
                 self.tracked_dirs[dir_path][file_path] = os.path.getmtime(file_path)
-                logging.debug("tracking file {0} @ {1}".format(file_path, self.tracked_dirs[dir_path][file_path]))
+                log.debug("tracking file {0} @ {1}".format(file_path, self.tracked_dirs[dir_path][file_path]))
 
-        logging.debug("tracking directory {0} with {1} yara files".format(dir_path, len(self.tracked_dirs[dir_path])))
+        log.debug("tracking directory {0} with {1} yara files".format(dir_path, len(self.tracked_dirs[dir_path])))
 
     def track_yara_repository(self, dir_path):
         """Adds all files in a given directory that end with .yar when converted to lowercase.  Only changes to the current commit trigger rule reload."""
         if not os.path.isdir(dir_path):
-            logging.error("{0} is not a directory".format(dir_path))
+            log.error("{0} is not a directory".format(dir_path))
             return False
 
         if not os.path.exists(os.path.join(dir_path, '.git')):
-            logging.error("{0} is not a git repository (missing .git)".format(dir_path))
+            log.error("{0} is not a git repository (missing .git)".format(dir_path))
             return False
 
         # get the initial commit of this directory
         self.tracked_repos[dir_path] = get_current_repo_commit(dir_path)
-        logging.debug("tracking git repo {0} @ {1}".format(dir_path, self.tracked_repos[dir_path]))
+        log.debug("tracking git repo {0} @ {1}".format(dir_path, self.tracked_repos[dir_path]))
 
     def check_rules(self):
         """Returns True if the rules need to be recompiled, False otherwise."""
@@ -126,12 +129,12 @@ class YaraScanner(object):
 
         for file_path in self.tracked_files.keys():
             if self.tracked_files[file_path] is not None and not os.path.exists(file_path):
-                logging.info("detected deleted yara file {0}".format(file_path))
+                log.info("detected deleted yara file {0}".format(file_path))
                 self.track_yara_file(file_path)
                 reload_rules = True
 
             elif os.path.getmtime(file_path) != self.tracked_files[file_path]:
-                logging.info("detected change in yara file {0}".format(file_path))
+                log.info("detected change in yara file {0}".format(file_path))
                 self.track_yara_file(file_path)
                 reload_rules = True
 
@@ -145,19 +148,19 @@ class YaraScanner(object):
 
                 existing_files.add(file_path)
                 if file_path not in self.tracked_dirs[dir_path]:
-                    logging.info("detected new yara file {0} in {1}".format(file_path, dir_path))
+                    log.info("detected new yara file {0} in {1}".format(file_path, dir_path))
                     reload_dir = True
                     reload_rules = True
 
                 elif os.path.getmtime(file_path) != self.tracked_dirs[dir_path][file_path]:
-                    logging.info("detected change in yara file {0} dir {1}".format(file_path, dir_path))
+                    log.info("detected change in yara file {0} dir {1}".format(file_path, dir_path))
                     reload_dir = True
                     reload_rules = True
 
             # did a file get deleted?
             for file_path in self.tracked_dirs[dir_path].keys():
                 if file_path not in existing_files:
-                    logging.info("detected deleted yara file {0} in {1}".format(file_path, dir_path))
+                    log.info("detected deleted yara file {0} in {1}".format(file_path, dir_path))
                     reload_dir = True
                     reload_rules = True
 
@@ -166,11 +169,11 @@ class YaraScanner(object):
 
         for repo_path in self.tracked_repos.keys():
             current_repo_commit = get_current_repo_commit(repo_path)
-            #logging.debug("repo {0} current commit {1} tracked commit {2}".format(
+            #log.debug("repo {0} current commit {1} tracked commit {2}".format(
                 #repo_path, self.tracked_repos[repo_path], current_repo_commit))
 
             if current_repo_commit != self.tracked_repos[repo_path]:
-                logging.info("detected change in git repo {0}".format(repo_path))
+                log.info("detected change in git repo {0}".format(repo_path))
                 self.track_yara_repository(repo_path)
                 reload_rules = True
 
@@ -199,16 +202,16 @@ class YaraScanner(object):
         for namespace in all_files.keys():
             for file_path in all_files[namespace]:
                 with open(file_path, 'r') as fp:
-                    logging.debug("loading namespace {0} rule file {1}".format(namespace, file_path))
+                    log.debug("loading namespace {0} rule file {1}".format(namespace, file_path))
                     # we compile each rule individually so that we can see which rule failed to load
                     data = fp.read()
 
                     try:
-                        logging.debug("compiling ...")
+                        log.debug("compiling ...")
                         yara.compile(source=data)
                         rule_count += 1
                     except Exception as e:
-                        logging.error("unable to compile {0}: {1}".format(file_path, str(e)))
+                        log.error("unable to compile {0}: {1}".format(file_path, str(e)))
                         continue
                         
                     # then we just store the source to be loaded all at once in the compilation that gets used
@@ -221,10 +224,10 @@ class YaraScanner(object):
             sources[namespace] = '\r\n'.join(sources[namespace])
 
         try:
-            logging.info("loading {} rules".format(rule_count))
+            log.info("loading {} rules".format(rule_count))
             self.rules = yara.compile(sources=sources)
         except Exception as e:
-            logging.error("unable to compile all yara rules combined: {0}".format(str(e)))
+            log.error("unable to compile all yara rules combined: {0}".format(str(e)))
             self.rules = None
 
     # we're keeping things backwards compatible here...
@@ -280,7 +283,7 @@ class YaraScanner(object):
 
             # is this a rule we've blacklisted?
             if match_result.rule in self.blacklist:
-                logging.debug("rule {0} is blacklisted".format(match_result.rule))
+                log.debug("rule {0} is blacklisted".format(match_result.rule))
                 continue
 
             for directive in match_result.meta:
@@ -324,7 +327,7 @@ class YaraScanner(object):
                         else:
                             p = Popen(['file', '-b', '--mime-type', file_path], stdout=PIPE)
                             mime_type = p.stdout.read().decode().strip()
-                            logging.debug("got mime type {0} for {1}".format(mime_type, file_path))
+                            log.debug("got mime type {0} for {1}".format(mime_type, file_path))
 
                     compare_target = mime_type
 
@@ -336,10 +339,10 @@ class YaraScanner(object):
 
                 else:
                     # not a meta tag we're using
-                    #logging.debug("not a valid meta directive {0}".format(directive))
+                    #log.debug("not a valid meta directive {0}".format(directive))
                     continue
 
-                logging.debug("compare target is {0} for directive {1}".format(compare_target, directive))
+                log.debug("compare target is {0} for directive {1}".format(compare_target, directive))
 
                 # figure out how to compare what is supplied by the user to the search target
                 if use_regex:
@@ -352,10 +355,10 @@ class YaraScanner(object):
                 matches = False
                 for search_item in [x.strip() for x in value.lower().split(',')]:
                     matches = matches or compare_function(search_item, compare_target)
-                    #logging.debug("search item {0} vs compare target {1} matches {2}".format(search_item, compare_target, matches))
+                    #log.debug("search item {0} vs compare target {1} matches {2}".format(search_item, compare_target, matches))
 
                 if ( inverted and matches ) or ( not inverted and not matches ):
-                    logging.debug("skipping yara rule {0} for file {1} directive {2} list {3} negated {4} regex {5} subsearch {6}".format(
+                    log.debug("skipping yara rule {0} for file {1} directive {2} list {3} negated {4} regex {5} subsearch {6}".format(
                         match_result.rule, file_path, directive, value, inverted, use_regex, use_substring))
                     skip = True
                     break # we are skipping so we don't need to check anything else
@@ -379,7 +382,7 @@ class YaraScanner(object):
                 with open(yara_stdout_file, 'w') as fp:
                     json.dump(self.scan_results, indent=4, sort_keys=True)
             except Exception as e:
-                logging.error("unable to write to {0}: {1}".format(yara_stdout_file, str(e)))
+                log.error("unable to write to {0}: {1}".format(yara_stdout_file, str(e)))
             
         return len(self.scan_results) != 0
 
@@ -492,7 +495,7 @@ class YaraScannerServer(object):
                     self.execute_process_manager()
                     time.sleep(0.1)
                 except Exception as e:
-                    logging.error("uncaught exception: {}".format(e))
+                    log.error("uncaught exception: {}".format(e))
                     time.sleep(1)
         except KeyboardInterrupt:
             pass
@@ -500,16 +503,16 @@ class YaraScannerServer(object):
         # wait for all the scanners to die...
         for server in self.servers:
             if server:
-                logging.info("waiting for scanner {} to exit...".format(server.pid))
+                log.info("waiting for scanner {} to exit...".format(server.pid))
                 server.join()
 
-        logging.info("exiting")
+        log.info("exiting")
 
     def execute_process_manager(self):
         for i, p in enumerate(self.servers):
             if self.servers[i] is not None:
                 if not self.servers[i].is_alive():
-                    logging.info("detected dead scanner {}".format(self.servers[i].pid))
+                    log.info("detected dead scanner {}".format(self.servers[i].pid))
                     self.servers[i].join()
                     self.servers[i] = None
 
@@ -517,7 +520,7 @@ class YaraScannerServer(object):
             if scanner is None:
                 self.servers[i] = multiprocessing.Process(target=self.run, name="Yara Scanner Server ({})".format(i), args=(i,))
                 self.servers[i].start()
-                logging.info("started scanner on cpu {} with pid {}".format(i, self.servers[i].pid))
+                log.info("started scanner on cpu {} with pid {}".format(i, self.servers[i].pid))
 
     def initialize_server_socket(self):
         self.server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -525,13 +528,13 @@ class YaraScannerServer(object):
 
         # the path of the unix socket will be socket_dir/cpu_index where cpu_index >= 0
         self.socket_path = os.path.join(self.base_dir, 'socket', str(self.cpu_index))
-        logging.debug("initializing server socket on {}".format(self.socket_path))
+        log.debug("initializing server socket on {}".format(self.socket_path))
 
         if os.path.exists(self.socket_path):
             try:
                 os.remove(self.socket_path)
             except Exception as e:
-                logging.error("unable to remove {}: {}".format(self.socket_path, e))
+                log.error("unable to remove {}: {}".format(self.socket_path, e))
 
         self.server_socket.bind(self.socket_path)
         self.server_socket.listen(self.backlog)
@@ -543,12 +546,12 @@ class YaraScannerServer(object):
         try:
             self.server_socket.close()
         except Exception as e:
-            logging.error("unable to close server socket: {}".format(e))
+            log.error("unable to close server socket: {}".format(e))
         
         self.server_socket = None
     
     def initialize_scanner(self):
-        logging.info("initializing scanner")
+        log.info("initializing scanner")
         self.scanner = YaraScanner(signature_dir=self.signature_dir)
         self.scanner.load_rules()
         self.last_check_time = datetime.datetime.now()
@@ -556,7 +559,7 @@ class YaraScannerServer(object):
     def start(self):
         self.process_manager = multiprocessing.Process(target=self.run_process_manager)
         self.process_manager.start()
-        logging.info("started process manager on pid {}".format(self.process_manager.pid))
+        log.info("started process manager on pid {}".format(self.process_manager.pid))
 
     def stop(self):
         # already stopped?
@@ -564,7 +567,7 @@ class YaraScannerServer(object):
             return
 
         self.shutdown.set()
-        logging.info("waiting for process manager to exit...")
+        log.info("waiting for process manager to exit...")
         self.process_manager.join()
 
         # process manager waits for the child processes to exit so we're done at this point
@@ -585,11 +588,11 @@ class YaraScannerServer(object):
                     self.execute()
 
                     if self.sighup:
-                        logging.info("caught sighup in {}: exiting...".format(os.getpid()))
+                        log.info("caught sighup in {}: exiting...".format(os.getpid()))
                         break
         
                     if (datetime.datetime.now() - self.last_check_time).total_seconds() > self.update_frequency:
-                        logging.debug('checking for new rules...')
+                        log.debug('checking for new rules...')
                         
                         # rather than reloading the rules we just exit
                         # the process manager will start a new scanner
@@ -602,10 +605,10 @@ class YaraScannerServer(object):
                     # OK this happens when we get a SIGHUP and we're in the middle of a system call
                     pass
                 except Exception as e:
-                    logging.error("uncaught exception: {} ({})".format(e, type(e)))
+                    log.error("uncaught exception: {} ({})".format(e, type(e)))
 
         except KeyboardInterrupt:
-            logging.info("caught keyboard interrupt - exiting")
+            log.info("caught keyboard interrupt - exiting")
 
     def execute(self):
         # are we listening on the socket yet?
@@ -620,7 +623,7 @@ class YaraScannerServer(object):
 
         # get the next client connection
         try:
-            logging.debug("waiting for client")
+            log.debug("waiting for client")
             client_socket, _ = self.server_socket.accept()
         except socket.timeout as e:
             # nothing came in while we were waiting (check for shutdown and try again)
@@ -629,13 +632,13 @@ class YaraScannerServer(object):
         try:
             self.process_client(client_socket)
         except Exception as e:
-            logging.error("unable to process client request: {}".format(e))
+            log.error("unable to process client request: {}".format(e))
             traceback.print_exc()
         finally:
             try:
                 client_socket.close()
             except Exception as e:
-                logging.error("unable to close client connection: {}".format(e))
+                log.error("unable to close client connection: {}".format(e))
 
     def process_client(self, client_socket):
         # read the command byte
@@ -653,16 +656,16 @@ class YaraScannerServer(object):
         try:
             matches = False
             if command == COMMAND_FILE_PATH:
-                logging.info("scanning file {}".format(data_or_file))
+                log.info("scanning file {}".format(data_or_file))
                 matches = self.scanner.scan(data_or_file, external_vars=ext_vars)
             elif command == COMMAND_DATA_STREAM:
-                logging.info("scanning {} byte data stream".format(len(data_or_file)))
+                log.info("scanning {} byte data stream".format(len(data_or_file)))
                 matches = self.scanner.scan_data(data_or_file, external_vars=ext_vars)
             else:
-                logging.error("invalid command {}".format(command))
+                log.error("invalid command {}".format(command))
                 return
         except Exception as e:
-            logging.info("scanning failed: {}".format(e))
+            log.info("scanning failed: {}".format(e))
             send_data_block(client_socket, pickle.dumps(e))
             return
 
@@ -710,7 +713,7 @@ def _scan(command, data_or_file, ext_vars={}, base_dir=None):
             return result
 
         except socket.error as e:
-            logging.debug("possible restarting scanner: {}".format(e))
+            log.debug("possible restarting scanner: {}".format(e))
             # in the case where a scanner is restarting (when loading rules)
             # we will receive a socket error when we try to connect
             # just move on to the next socket and try again
@@ -721,7 +724,7 @@ def _scan(command, data_or_file, ext_vars={}, base_dir=None):
             # if we've swung back around wait for a few seconds and try again
             if scanner_index == starting_index:
                 if not second_try:
-                    logging.info("waiting for available yara scanners...")
+                    log.info("waiting for available yara scanners...")
                     time.sleep(3)
                     second_try = True
                     continue
@@ -756,7 +759,7 @@ def read_n_bytes(s, n):
 
     result = b''.join(_buffer)
     if len(result) != n:
-        logging.warning("expected {} bytes but read {}".format(n, len(result)))
+        log.warning("expected {} bytes but read {}".format(n, len(result)))
 
     return b''.join(_buffer)
 
@@ -764,7 +767,7 @@ def read_data_block_size(s):
     """Reads the size of the next data block from the given socket."""
     size = struct.unpack('!I', read_n_bytes(s, 4))
     size = size[0]
-    logging.debug("read command block size {}".format(size))
+    log.debug("read command block size {}".format(size))
     return size
 
 def read_data_block(s):
@@ -772,7 +775,7 @@ def read_data_block(s):
     # read the size of the data block (4 byte network order integer)
     size = struct.unpack('!I', read_n_bytes(s, 4))
     size = size[0]
-    #logging.debug("read command block size {}".format(size))
+    #log.debug("read command block size {}".format(size))
     # read the data portion of the data block
     return read_n_bytes(s, size)
 
@@ -788,7 +791,7 @@ def iterate_data_blocks(s):
 def send_data_block(s, data):
     """Writes the given data to the given socket as a data block."""
     message = b''.join([struct.pack("!I", len(data)), data])
-    #logging.debug("sending data block length {} ({})".format(len(message), message[:64]))
+    #log.debug("sending data block length {} ({})".format(len(message), message[:64]))
     s.sendall(message)
 
 def send_block0(s):
@@ -875,7 +878,7 @@ def main():
                     for match in scanner.scan_results:
                         print('\t{0}'.format(match['rule']))
         except Exception as e:
-            logging.error("scan failed for {}: {}".format(file_path, e))
+            log.error("scan failed for {}: {}".format(file_path, e))
             exit_result = 1
 
     def scan_dir(dir_path):
@@ -902,5 +905,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-else:
-    logging = logging.getLogger('yara-scanner')
