@@ -3,7 +3,7 @@
 def main():
 
     import argparse
-    import logging, logging.config
+    import logging, logging.config, logging.handlers
     import os, os.path
     import sys
     import time
@@ -104,6 +104,7 @@ def main():
         logging.config.fileConfig(args.logging_config_path)
     except Exception as e:
         sys.stderr.write("unable to load logging configuration: {}\n".format(e))
+        import traceback; traceback.print_exc()
         sys.exit(1)
 
     # are we running as a deamon/
