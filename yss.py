@@ -18,6 +18,8 @@ def main():
         help="Path to the logging configuration file.")
     parser.add_argument('-d', '--signature-dir', required=False, default='/opt/signatures',
         help="The signature directory to load. Defaults to /opt/signatures")
+    parser.add_argument('-s', '--socket-dir', required=False, default='socket',
+        help="The directory (relative to --base-dir) that contains the unix sockets.")
     parser.add_argument('-u', '--update-frequency', required=False, default=60, type=int,
         help="How often to check for modifications to the yara rules (in seconds). Defaults to 60.")
     parser.add_argument('--backlog', required=False, default=50, type=int,
@@ -86,7 +88,7 @@ def main():
         sys.exit(1)
 
     # make sure these directories exist
-    for _dir in [ 'logs', 'socket' ]:
+    for _dir in [ 'logs', args.socket_dir ]:
         path = os.path.join(args.base_dir, _dir)
         if not os.path.isdir(path):
             try:
@@ -169,6 +171,7 @@ def main():
     server = YaraScannerServer(
         base_dir=args.base_dir, 
         signature_dir=args.signature_dir,
+        socket_dir=args.socket_dir,
         update_frequency=args.update_frequency,
         backlog=args.backlog)
 

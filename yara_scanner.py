@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# vim: sw=4:ts=4:et
+# vim: sw=4:ts=4:et:cc=120
 
 import json
 import logging
@@ -429,9 +429,13 @@ COMMAND_FILE_PATH = b'1'
 COMMAND_DATA_STREAM = b'2'
 
 DEFAULT_BASE_DIR = '/opt/yara_scanner'
+DEFAULT_SIGNATURE_DIR = '/opt/signatures'
+DEFAULT_SOCKET_DIR = 'socket'
 
 class YaraScannerServer(object):
-    def __init__(self, base_dir=None, signature_dir=None, update_frequency=60, backlog=50):
+    def __init__(self, base_dir=DEFAULT_BASE_DIR, signature_dir=DEFAULT_SIGNATURE_DIR, socket_dir=DEFAULT_SOCKET_DIR, 
+                 update_frequency=60, backlog=50):
+
         # set to True to gracefully shutdown
         self.shutdown = multiprocessing.Event()
 
@@ -443,13 +447,13 @@ class YaraScannerServer(object):
         self.servers = [None for _ in range(multiprocessing.cpu_count())]
 
         # base directory of yara scanner
-        if base_dir:
-            self.base_dir = base_dir
-        else:
-            self.base_dir = DEFAULT_BASE_DIR
+        self.base_dir = base_dir
 
         # the directory that contains the signatures to load
         self.signature_dir = signature_dir
+
+        # the directory that contains the unix sockets
+        self.socket_dir = socket_dir
 
         # how often do we check to see if the yara rules changed? (in seconds)
         self.update_frequency = update_frequency
@@ -527,8 +531,8 @@ class YaraScannerServer(object):
         self.server_socket.settimeout(1)
 
         # the path of the unix socket will be socket_dir/cpu_index where cpu_index >= 0
-        self.socket_path = os.path.join(self.base_dir, 'socket', str(self.cpu_index))
-        log.debug("initializing server socket on {}".format(self.socket_path))
+        self.socket_path = os.path.join(self.base_dir, self.socket_dir, str(self.cpu_index))
+        log.info("initializing server socket on {}".format(self.socket_path))
 
         if os.path.exists(self.socket_path):
             try:
@@ -549,6 +553,12 @@ class YaraScannerServer(object):
             log.error("unable to close server socket: {}".format(e))
         
         self.server_socket = None
+
+        if os.path.exists(self.socket_path):
+            try:
+                os.remove(self.socket_path)
+            except Exception as e:
+                logging.error("unable to remove {}: {}".format(self.socket_path, e))
     
     def initialize_scanner(self):
         log.info("initializing scanner")
@@ -609,6 +619,8 @@ class YaraScannerServer(object):
 
         except KeyboardInterrupt:
             log.info("caught keyboard interrupt - exiting")
+
+        self.kill_server_socket()
 
     def execute(self):
         # are we listening on the socket yet?
@@ -677,17 +689,14 @@ class YaraScannerServer(object):
             #print(self.scanner.scan_results)
             send_data_block(client_socket, pickle.dumps(self.scanner.scan_results))
 
-def _scan(command, data_or_file, ext_vars={}, base_dir=None):
-    if not base_dir:
-        base_dir = DEFAULT_BASE_DIR
-
+def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_dir=DEFAULT_SOCKET_DIR):
     # pick a random scanner
     # it doesn't matter which one, as long as the load is evenly distributed
     starting_index = scanner_index = random.randrange(multiprocessing.cpu_count())
     second_try = False
 
     while True:
-        socket_path = os.path.join(base_dir, 'socket', str(scanner_index))
+        socket_path = os.path.join(base_dir, socket_dir, str(scanner_index))
 
         ext_vars_json = b''
         if ext_vars:
@@ -735,11 +744,11 @@ def _scan(command, data_or_file, ext_vars={}, base_dir=None):
 
             continue
 
-def scan_file(path, base_dir=None, ext_vars={}):
-    return _scan(COMMAND_FILE_PATH, path, ext_vars=ext_vars, base_dir=base_dir)
+def scan_file(path, base_dir=None, socket_dir=DEFAULT_SOCKET_DIR, ext_vars={}):
+    return _scan(COMMAND_FILE_PATH, path, ext_vars=ext_vars, base_dir=base_dir, socket_dir=socket_dir)
         
-def scan_data(data):
-    return _scan(COMMAND_DATA_STREAM, data, ext_vars=ext_vars, base_dir=base_dir)
+def scan_data(data): # XXX ????
+    return _scan(COMMAND_DATA_STREAM, data, ext_vars=ext_vars, base_dir=base_dir, socket_dir=socket_dir)
 
 #
 # protocol routines
