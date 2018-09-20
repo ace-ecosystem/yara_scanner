@@ -22,6 +22,8 @@ def main():
         help="The directory (relative to --base-dir) that contains the unix sockets.")
     parser.add_argument('-u', '--update-frequency', required=False, default=60, type=int,
         help="How often to check for modifications to the yara rules (in seconds). Defaults to 60.")
+    parser.add_argument('--pid-file', required=False, default='.yss.pid', 
+        help="The file name (relative to base_dir) used to store the pid of the running daemon yss process.")
     parser.add_argument('--backlog', required=False, default=50, type=int,
         help="The maximum number of queued connections. Defaults to 50.")
     parser.add_argument('-b', '--background', required=False, default=False, action='store_true',
@@ -34,7 +36,7 @@ def main():
         sys.stderr.write("unknown base directory {}\n".format(args.base_dir))
         sys.exit(1)
 
-    pid_file = os.path.join(args.base_dir, '.yss.pid')
+    pid_file = os.path.join(args.base_dir, args.pid_file)
     if args.kill:
         if os.path.exists(pid_file):
             # is it still running?
