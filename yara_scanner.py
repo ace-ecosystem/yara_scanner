@@ -103,7 +103,7 @@ class YaraScanner(object):
 
         for file_path in os.listdir(dir_path):
             file_path = os.path.join(dir_path, file_path)
-            if file_path.lower().endswith('.yar'):
+            if file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara'):
                 self.tracked_dirs[dir_path][file_path] = os.path.getmtime(file_path)
                 log.debug("tracking file {0} @ {1}".format(file_path, self.tracked_dirs[dir_path][file_path]))
 
@@ -143,7 +143,7 @@ class YaraScanner(object):
             existing_files = set() # keep track of the ones we see
             for file_path in os.listdir(dir_path):
                 file_path = os.path.join(dir_path, file_path)
-                if not file_path.lower().endswith('.yar'):
+                if not ( file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara') ):
                     continue
 
                 existing_files.add(file_path)
@@ -196,7 +196,7 @@ class YaraScanner(object):
             all_files[repo_path] = []
             for file_path in os.listdir(repo_path):
                 file_path = os.path.join(repo_path, file_path)
-                if file_path.lower().endswith('.yar'):
+                if file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara'):
                     all_files[repo_path].append(file_path)
 
         for namespace in all_files.keys():
