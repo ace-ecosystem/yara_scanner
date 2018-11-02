@@ -3,7 +3,7 @@
 def main():
 
     import argparse
-    import logging, logging.config
+    import logging, logging.config, logging.handlers
     import os, os.path
     import sys
     import time
@@ -18,8 +18,12 @@ def main():
         help="Path to the logging configuration file.")
     parser.add_argument('-d', '--signature-dir', required=False, default='/opt/signatures',
         help="The signature directory to load. Defaults to /opt/signatures")
+    parser.add_argument('-s', '--socket-dir', required=False, default='socket',
+        help="The directory (relative to --base-dir) that contains the unix sockets.")
     parser.add_argument('-u', '--update-frequency', required=False, default=60, type=int,
         help="How often to check for modifications to the yara rules (in seconds). Defaults to 60.")
+    parser.add_argument('--pid-file', required=False, default='.yss.pid', 
+        help="The file name (relative to base_dir) used to store the pid of the running daemon yss process.")
     parser.add_argument('--backlog', required=False, default=50, type=int,
         help="The maximum number of queued connections. Defaults to 50.")
     parser.add_argument('-b', '--background', required=False, default=False, action='store_true',
@@ -32,7 +36,7 @@ def main():
         sys.stderr.write("unknown base directory {}\n".format(args.base_dir))
         sys.exit(1)
 
-    pid_file = os.path.join(args.base_dir, '.yss.pid')
+    pid_file = os.path.join(args.base_dir, args.pid_file)
     if args.kill:
         if os.path.exists(pid_file):
             # is it still running?
@@ -86,7 +90,7 @@ def main():
         sys.exit(1)
 
     # make sure these directories exist
-    for _dir in [ 'logs', 'socket' ]:
+    for _dir in [ 'logs', args.socket_dir ]:
         path = os.path.join(args.base_dir, _dir)
         if not os.path.isdir(path):
             try:
@@ -104,6 +108,7 @@ def main():
         logging.config.fileConfig(args.logging_config_path)
     except Exception as e:
         sys.stderr.write("unable to load logging configuration: {}\n".format(e))
+        import traceback; traceback.print_exc()
         sys.exit(1)
 
     # are we running as a deamon/
@@ -168,6 +173,7 @@ def main():
     server = YaraScannerServer(
         base_dir=args.base_dir, 
         signature_dir=args.signature_dir,
+        socket_dir=args.socket_dir,
         update_frequency=args.update_frequency,
         backlog=args.backlog)
 

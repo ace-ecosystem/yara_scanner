@@ -14,7 +14,7 @@ from setuptools import setup
 from codecs import open
 from os import path
 
-__version__ = "1.0.5"
+__version__ = "1.0.10"
 description = "A Python wrapper library for libyara and a local server for " \
               "fully utilizing the CPUs of the system to scan with yara."
 
