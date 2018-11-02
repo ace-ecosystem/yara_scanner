@@ -14,7 +14,7 @@ from setuptools import setup
 from codecs import open
 from os import path
 
-__version__ = "1.0.10"
+__version__ = "1.0.11"
 description = "A Python wrapper library for libyara and a local server for " \
               "fully utilizing the CPUs of the system to scan with yara."
 
@@ -90,7 +90,7 @@ setup(
     # your project is installed. For an analysis of "install_requires" vs pip's
     # requirements files see:
     # https://packaging.python.org/en/latest/requirements.html
-    install_requires=['psutil', 'yara-python'],
+    install_requires=['psutil', 'yara-python', 'plyara'],
 
     entry_points={
         'console_scripts': [

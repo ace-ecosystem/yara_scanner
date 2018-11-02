@@ -9,10 +9,11 @@ import re
 
 from subprocess import Popen, PIPE
 
-# requires python-yara version 3.4
+# requires python-yara version 3.8
+import plyara
 import yara
-yara.set_config(max_strings_per_rule=30720)
 
+yara.set_config(max_strings_per_rule=30720)
 log = logging.getLogger('yara-scanner')
 
 def get_current_repo_commit(repo_dir):
@@ -203,51 +204,87 @@ class YaraScanner(object):
                     all_files[repo_path].append(file_path)
 
         if self.test_mode:
-            execution_times = [] # of (total_seconds, buffer_type, file_name)
-            execution_errors = [] # of (error_message, buffer_type, file_name)
-
-            log.info("building test buffers...")
-            random_buffer = os.urandom(1024 * 1024)
+            execution_times = [] # of (total_seconds, buffer_type, file_name, rule_name)
+            execution_errors = [] # of (error_message, buffer_type, file_name, rule_name)
+            random_buffer = os.urandom(1024 * 1024) # random data to scan
 
         for namespace in all_files.keys():
             for file_path in all_files[namespace]:
                 with open(file_path, 'r') as fp:
-                    log.debug("loading namespace {0} rule file {1}".format(namespace, file_path))
-                    # we compile each rule individually so that we can see which rule failed to load
+                    log.debug("loading namespace {} rule file {}".format(namespace, file_path))
                     data = fp.read()
 
                     try:
-                        log.debug("compiling ...")
+                        # compile the file as a whole first, make sure that works
                         rule_context = yara.compile(source=data)
                         rule_count += 1
                     except Exception as e:
-                        log.error("unable to compile {0}: {1}".format(file_path, str(e)))
+                        log.error("unable to compile {}: {}".format(file_path, str(e)))
                         continue
 
-                    # test against a 10MB random buffer
                     if self.test_mode:
-                        start_time = time.time()
-                        try:
-                            log.info("testing {}".format(file_path))
-                            rule_context.match(data=random_buffer, timeout=5)
-                            end_time = time.time()
-                            total_seconds = end_time - start_time
-                            execution_times.append((total_seconds, 'random', file_path))
-                        except Exception as e:
-                            execution_errors.append((str(e), 'random', file_name))
+                        parser = plyara.Plyara()
+                        parsed_rules = { } # key = rule_name, value = parsed_yara_rule
+                        for parsed_rule in parser.parse_string(data):
+                            parsed_rules[parsed_rule['rule_name']] = parsed_rule
 
-                        for x in range(255):
-                            byte_buffer = bytes([x]) * (1024 * 1024)
+                        for rule_name in parsed_rules.keys():
+                            # some rules depend on other rules, so we deal with that here
+                            dependencies = [] # list of rule_names that this rule needs
+                            rule_context = None
+
+                            while True:
+                                # compile all the rules we've collected so far as one
+                                dep_source = '\n'.join([parser.rebuild_yara_rule(parsed_rules[r]) 
+                                                        for r in dependencies])
+                                try:
+                                    rule_context = yara.compile(source='{}\n{}'.format(dep_source, 
+                                                   parser.rebuild_yara_rule(parsed_rules[rule_name])))
+                                    break
+                                except Exception as e:
+                                    # some rules depend on other rules
+                                    m = re.search(r'undefined identifier "([^"]+)"', str(e))
+                                    if m:
+                                        dependency = m.group(1)
+                                        if dependency in parsed_rules:
+                                            # add this rule to the compilation and try again
+                                            dependencies.insert(0, dependency)
+                                            continue
+                                
+                                    log.warning("rule {} in file {} does not compile by itself: {}".format(
+                                                rule_name, file_path, e))
+                                    rule_context = None
+                                    break
+
+                            if not rule_context:
+                                continue
+
+                            if dependencies:
+                                log.info("testing {}:{},{}".format(file_path, rule_name, ','.join(dependencies)))
+                            else:
+                                log.info("testing {}:{}".format(file_path, rule_name))
+                            
                             start_time = time.time()
                             try:
-                                rule_context.match(data=byte_buffer, timeout=5)
+                                rule_context.match(data=random_buffer, timeout=5)
                                 end_time = time.time()
                                 total_seconds = end_time - start_time
-                                execution_times.append((total_seconds, 'byte({})'.format(x), file_path))
+                                execution_times.append((total_seconds, 'random', file_path, rule_name))
                             except Exception as e:
-                                execution_errors.append((str(e), 'byte({})'.format(x), file_path))
-                                # if we fail once we break out
-                                break
+                                execution_errors.append((str(e), 'random', file_name))
+
+                            for x in range(255):
+                                byte_buffer = bytes([x]) * (1024 * 1024)
+                                start_time = time.time()
+                                try:
+                                    rule_context.match(data=byte_buffer, timeout=5)
+                                    end_time = time.time()
+                                    total_seconds = end_time - start_time
+                                    execution_times.append((total_seconds, 'byte({})'.format(x), file_path, rule_name))
+                                except Exception as e:
+                                    execution_errors.append((str(e), 'byte({})'.format(x), file_path, rule_name))
+                                    # if we fail once we break out
+                                    break
                         
                     # then we just store the source to be loaded all at once in the compilation that gets used
                     if namespace not in sources:
@@ -257,11 +294,11 @@ class YaraScanner(object):
 
         if self.test_mode:
             execution_times = sorted(execution_times, key=lambda x: x[0])
-            for execution_time, buffer_type, file_path in execution_times:
-                print("{}: {} {}".format(file_path, buffer_type, execution_time))
+            for execution_time, buffer_type, file_path, yara_rule in execution_times:
+                print("{}:{} <{}> {}".format(file_path, yara_rule, buffer_type, execution_time))
 
-            for error_message, buffer_type, file_path in execution_errors:
-                print("{}: {} {}".format(file_path, buffer_type, error_message))
+            for error_message, buffer_type, file_path, yara_rule in execution_errors:
+                print("{}:{} <{}> {}".format(file_path, yara_rule, buffer_type, error_message))
 
             return
 
