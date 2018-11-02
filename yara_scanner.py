@@ -41,7 +41,7 @@ class YaraJSONEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, o)
 
 class YaraScanner(object):
-    def __init__(self, signature_dir=None, thread_count=None):
+    def __init__(self, signature_dir=None, thread_count=None, test_mode=False):
         self.rules = None
         self.scan_results = []
 
@@ -57,6 +57,9 @@ class YaraScanner(object):
         # both parameters to this function are for backwards compatibility
         if thread_count is not None:
             log.warning("thread_count is no longer used in YaraScanner.__init__")
+
+        # if we are in test mode, we test each yara file as it is loaded for performance issues
+        self.test_mode = test_mode
         
         if signature_dir is not None:
             #log.warning("using old signature_dir parameter to YaraScanner.__init__")
@@ -199,6 +202,13 @@ class YaraScanner(object):
                 if file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara'):
                     all_files[repo_path].append(file_path)
 
+        if self.test_mode:
+            execution_times = [] # of (total_seconds, buffer_type, file_name)
+            execution_errors = [] # of (error_message, buffer_type, file_name)
+
+            log.info("building test buffers...")
+            random_buffer = os.urandom(1024 * 1024)
+
         for namespace in all_files.keys():
             for file_path in all_files[namespace]:
                 with open(file_path, 'r') as fp:
@@ -208,17 +218,52 @@ class YaraScanner(object):
 
                     try:
                         log.debug("compiling ...")
-                        yara.compile(source=data)
+                        rule_context = yara.compile(source=data)
                         rule_count += 1
                     except Exception as e:
                         log.error("unable to compile {0}: {1}".format(file_path, str(e)))
                         continue
+
+                    # test against a 10MB random buffer
+                    if self.test_mode:
+                        start_time = time.time()
+                        try:
+                            log.info("testing {}".format(file_path))
+                            rule_context.match(data=random_buffer, timeout=5)
+                            end_time = time.time()
+                            total_seconds = end_time - start_time
+                            execution_times.append((total_seconds, 'random', file_path))
+                        except Exception as e:
+                            execution_errors.append((str(e), 'random', file_name))
+
+                        for x in range(255):
+                            byte_buffer = bytes([x]) * (1024 * 1024)
+                            start_time = time.time()
+                            try:
+                                rule_context.match(data=byte_buffer, timeout=5)
+                                end_time = time.time()
+                                total_seconds = end_time - start_time
+                                execution_times.append((total_seconds, 'byte({})'.format(x), file_path))
+                            except Exception as e:
+                                execution_errors.append((str(e), 'byte({})'.format(x), file_path))
+                                # if we fail once we break out
+                                break
                         
                     # then we just store the source to be loaded all at once in the compilation that gets used
                     if namespace not in sources:
                         sources[namespace] = []
 
                     sources[namespace].append(data)
+
+        if self.test_mode:
+            execution_times = sorted(execution_times, key=lambda x: x[0])
+            for execution_time, buffer_type, file_path in execution_times:
+                print("{}: {} {}".format(file_path, buffer_type, execution_time))
+
+            for error_message, buffer_type, file_path in execution_errors:
+                print("{}: {} {}".format(file_path, buffer_type, error_message))
+
+            return
 
         for namespace in sources.keys():
             sources[namespace] = '\r\n'.join(sources[namespace])
@@ -241,7 +286,7 @@ class YaraScanner(object):
 
         # scan the file
         # external variables come from the profile points added to the file
-        yara_matches = self.rules.match(file_path, externals=external_vars)
+        yara_matches = self.rules.match(file_path, externals=external_vars, timeout=5)
         return self._scan(file_path, None, yara_matches, yara_stdout_file, yara_stderr_file, external_vars)
 
     def scan_data(self,
@@ -254,7 +299,7 @@ class YaraScanner(object):
 
         # scan the data stream
         # external variables come from the profile points added to the file
-        yara_matches = self.rules.match(file_path, externals=external_vars)
+        yara_matches = self.rules.match(file_path, externals=external_vars, timeout=5)
         return self._scan(None, data, yara_matches, yara_stdout_file, yara_stderr_file, external_vars)
 
     def _scan(self, 
@@ -827,6 +872,9 @@ def main():
     parser.add_argument('-j', '--dump-json', required=False, default=False, action='store_true', dest='dump_json',
         help="Dump JSON details of matches.  Otherwise just list the rules that hit.")
 
+    parser.add_argument('-t', '--test', required=False, default=False, action='store_true', dest='test',
+        help="Test each yara file separately against different types of buffers for performance issues.")
+
     parser.add_argument('-y', '--yara-rules', required=False, default=[], action='append', dest='yara_rules',
         help="One yara rule to load.  You can specify more than one of these.")
     parser.add_argument('-Y', '--yara-dirs', required=False, default=[], action='append', dest='yara_dirs',
@@ -848,14 +896,14 @@ def main():
     if len(args.yara_rules) == 0 and len(args.yara_dirs) == 0 and len(args.yara_repos) == 0 and args.signature_dir is None:
         args.signature_dir = '/opt/signatures'
 
-    logging.basicConfig(level=logging.DEBUG if args.log_debug else logging.WARNING)
+    logging.basicConfig(level=logging.DEBUG if args.log_debug else logging.INFO)
 
     # load any blacklisting
     if args.blacklisted_rules_path is not None:
         with open(args.blacklisted_rules_path, 'r') as fp:
             args.blacklisted_rules.extend([x.strip() for x in fp.read().split('\n')])
 
-    scanner = YaraScanner(signature_dir=args.signature_dir)
+    scanner = YaraScanner(signature_dir=args.signature_dir, test_mode=args.test)
     scanner.blacklist = args.blacklisted_rules
     for file_path in args.yara_rules:
         scanner.track_yara_file(file_path)
@@ -871,7 +919,7 @@ def main():
     if scanner.check_rules():
         scanner.load_rules()
 
-    if args.compile_only:
+    if args.compile_only or args.test:
         sys.exit(0)
 
     exit_result = 0
