@@ -6,6 +6,7 @@ import logging
 import os
 import os.path
 import re
+import threading
 
 from subprocess import Popen, PIPE
 
@@ -23,10 +24,10 @@ def get_current_repo_commit(repo_dir):
     p.wait()
 
     if len(stderr.strip()) > 0:
-        log.error("git reported an error: {0}".format(stderr.strip()))
+        log.error("git reported an error: {}".format(stderr.strip()))
 
     if len(commit) < 40:
-        log.error("got {0} for stdout with git log".format(commit.strip()))
+        log.error("got {} for stdout with git log".format(commit.strip()))
         return None
 
     return commit[0:40]
@@ -95,12 +96,12 @@ class YaraScanner(object):
         else:
             self.tracked_files[file_path] = os.path.getmtime(file_path)
 
-        log.debug("yara file {0} tracked @ {1}".format(file_path, self.tracked_files[file_path]))
+        log.debug("yara file {} tracked @ {1}".format(file_path, self.tracked_files[file_path]))
 
     def track_yara_dir(self, dir_path):
         """Adds all files in a given directory that end with .yar when converted to lowercase.  All files are monitored for changes to mtime, as well as new and removed files."""
         if not os.path.isdir(dir_path):
-            log.error("{0} is not a directory".format(dir_path))
+            log.error("{} is not a directory".format(dir_path))
             return
 
         self.tracked_dirs[dir_path] = {}
@@ -109,23 +110,23 @@ class YaraScanner(object):
             file_path = os.path.join(dir_path, file_path)
             if file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara'):
                 self.tracked_dirs[dir_path][file_path] = os.path.getmtime(file_path)
-                log.debug("tracking file {0} @ {1}".format(file_path, self.tracked_dirs[dir_path][file_path]))
+                log.debug("tracking file {} @ {}".format(file_path, self.tracked_dirs[dir_path][file_path]))
 
-        log.debug("tracking directory {0} with {1} yara files".format(dir_path, len(self.tracked_dirs[dir_path])))
+        log.debug("tracking directory {} with {} yara files".format(dir_path, len(self.tracked_dirs[dir_path])))
 
     def track_yara_repository(self, dir_path):
         """Adds all files in a given directory that end with .yar when converted to lowercase.  Only changes to the current commit trigger rule reload."""
         if not os.path.isdir(dir_path):
-            log.error("{0} is not a directory".format(dir_path))
+            log.error("{} is not a directory".format(dir_path))
             return False
 
         if not os.path.exists(os.path.join(dir_path, '.git')):
-            log.error("{0} is not a git repository (missing .git)".format(dir_path))
+            log.error("{} is not a git repository (missing .git)".format(dir_path))
             return False
 
         # get the initial commit of this directory
         self.tracked_repos[dir_path] = get_current_repo_commit(dir_path)
-        log.debug("tracking git repo {0} @ {1}".format(dir_path, self.tracked_repos[dir_path]))
+        log.debug("tracking git repo {} @ {}".format(dir_path, self.tracked_repos[dir_path]))
 
     def check_rules(self):
         """Returns True if the rules need to be recompiled, False otherwise."""
@@ -133,12 +134,12 @@ class YaraScanner(object):
 
         for file_path in self.tracked_files.keys():
             if self.tracked_files[file_path] is not None and not os.path.exists(file_path):
-                log.info("detected deleted yara file {0}".format(file_path))
+                log.info("detected deleted yara file {}".format(file_path))
                 self.track_yara_file(file_path)
                 reload_rules = True
 
             elif os.path.getmtime(file_path) != self.tracked_files[file_path]:
-                log.info("detected change in yara file {0}".format(file_path))
+                log.info("detected change in yara file {}".format(file_path))
                 self.track_yara_file(file_path)
                 reload_rules = True
 
@@ -152,19 +153,19 @@ class YaraScanner(object):
 
                 existing_files.add(file_path)
                 if file_path not in self.tracked_dirs[dir_path]:
-                    log.info("detected new yara file {0} in {1}".format(file_path, dir_path))
+                    log.info("detected new yara file {} in {}".format(file_path, dir_path))
                     reload_dir = True
                     reload_rules = True
 
                 elif os.path.getmtime(file_path) != self.tracked_dirs[dir_path][file_path]:
-                    log.info("detected change in yara file {0} dir {1}".format(file_path, dir_path))
+                    log.info("detected change in yara file {} dir {}".format(file_path, dir_path))
                     reload_dir = True
                     reload_rules = True
 
             # did a file get deleted?
             for file_path in self.tracked_dirs[dir_path].keys():
                 if file_path not in existing_files:
-                    log.info("detected deleted yara file {0} in {1}".format(file_path, dir_path))
+                    log.info("detected deleted yara file {} in {}".format(file_path, dir_path))
                     reload_dir = True
                     reload_rules = True
 
@@ -173,11 +174,11 @@ class YaraScanner(object):
 
         for repo_path in self.tracked_repos.keys():
             current_repo_commit = get_current_repo_commit(repo_path)
-            #log.debug("repo {0} current commit {1} tracked commit {2}".format(
+            #log.debug("repo {} current commit {} tracked commit {}".format(
                 #repo_path, self.tracked_repos[repo_path], current_repo_commit))
 
             if current_repo_commit != self.tracked_repos[repo_path]:
-                log.info("detected change in git repo {0}".format(repo_path))
+                log.info("detected change in git repo {}".format(repo_path))
                 self.track_yara_repository(repo_path)
                 reload_rules = True
 
@@ -309,7 +310,7 @@ class YaraScanner(object):
             log.info("loading {} rules".format(rule_count))
             self.rules = yara.compile(sources=sources)
         except Exception as e:
-            log.error("unable to compile all yara rules combined: {0}".format(str(e)))
+            log.error("unable to compile all yara rules combined: {}".format(str(e)))
             self.rules = None
 
     # we're keeping things backwards compatible here...
@@ -365,7 +366,7 @@ class YaraScanner(object):
 
             # is this a rule we've blacklisted?
             if match_result.rule in self.blacklist:
-                log.debug("rule {0} is blacklisted".format(match_result.rule))
+                log.debug("rule {} is blacklisted".format(match_result.rule))
                 continue
 
             for directive in match_result.meta:
@@ -409,7 +410,7 @@ class YaraScanner(object):
                         else:
                             p = Popen(['file', '-b', '--mime-type', file_path], stdout=PIPE)
                             mime_type = p.stdout.read().decode().strip()
-                            log.debug("got mime type {0} for {1}".format(mime_type, file_path))
+                            log.debug("got mime type {} for {}".format(mime_type, file_path))
 
                     compare_target = mime_type
 
@@ -421,10 +422,10 @@ class YaraScanner(object):
 
                 else:
                     # not a meta tag we're using
-                    #log.debug("not a valid meta directive {0}".format(directive))
+                    #log.debug("not a valid meta directive {}".format(directive))
                     continue
 
-                log.debug("compare target is {0} for directive {1}".format(compare_target, directive))
+                log.debug("compare target is {} for directive {}".format(compare_target, directive))
 
                 # figure out how to compare what is supplied by the user to the search target
                 if use_regex:
@@ -437,10 +438,10 @@ class YaraScanner(object):
                 matches = False
                 for search_item in [x.strip() for x in value.lower().split(',')]:
                     matches = matches or compare_function(search_item, compare_target)
-                    #log.debug("search item {0} vs compare target {1} matches {2}".format(search_item, compare_target, matches))
+                    #log.debug("search item {} vs compare target {} matches {}".format(search_item, compare_target, matches))
 
                 if ( inverted and matches ) or ( not inverted and not matches ):
-                    log.debug("skipping yara rule {0} for file {1} directive {2} list {3} negated {4} regex {5} subsearch {6}".format(
+                    log.debug("skipping yara rule {} for file {} directive {} list {} negated {} regex {} subsearch {}".format(
                         match_result.rule, file_path, directive, value, inverted, use_regex, use_substring))
                     skip = True
                     break # we are skipping so we don't need to check anything else
@@ -464,7 +465,7 @@ class YaraScanner(object):
                 with open(yara_stdout_file, 'w') as fp:
                     json.dump(self.scan_results, indent=4, sort_keys=True)
             except Exception as e:
-                log.error("unable to write to {0}: {1}".format(yara_stdout_file, str(e)))
+                log.error("unable to write to {}: {}".format(yara_stdout_file, str(e)))
             
         return len(self.scan_results) != 0
 
@@ -559,9 +560,6 @@ class YaraScannerServer(object):
         # the scanner we're using for this process
         self.scanner = None
 
-        # the last time we checked to see if the yara rules had changed
-        self.last_check_time = None
-
         # set to True when we receive a SIGHUP
         self.sighup  = False
 
@@ -644,9 +642,9 @@ class YaraScannerServer(object):
     
     def initialize_scanner(self):
         log.info("initializing scanner")
-        self.scanner = YaraScanner(signature_dir=self.signature_dir)
-        self.scanner.load_rules()
-        self.last_check_time = datetime.datetime.now()
+        new_scanner = YaraScanner(signature_dir=self.signature_dir)
+        new_scanner.load_rules()
+        self.scanner = new_scanner
 
     def start(self):
         self.process_manager = multiprocessing.Process(target=self.run_process_manager)
@@ -665,7 +663,7 @@ class YaraScannerServer(object):
         # process manager waits for the child processes to exit so we're done at this point
 
     def run(self, cpu_index):
-        self.cpu_index = cpu_index
+        self.cpu_index = cpu_index # starting at 0
 
         def handler(signum, frame):
             self.sighup = True
@@ -673,7 +671,11 @@ class YaraScannerServer(object):
         signal.signal(signal.SIGHUP, handler)
 
         try:
+            # load up the yara scanner
             self.initialize_scanner()
+
+            # watch for the rules to change in another thread
+            self.start_rules_monitor()
 
             while not self.shutdown.is_set():
                 try:
@@ -682,19 +684,8 @@ class YaraScannerServer(object):
                     if self.sighup:
                         log.info("caught sighup in {}: exiting...".format(os.getpid()))
                         break
-        
-                    if (datetime.datetime.now() - self.last_check_time).total_seconds() > self.update_frequency:
-                        log.debug('checking for new rules...')
-                        
-                        # rather than reloading the rules we just exit
-                        # the process manager will start a new scanner
-                        if self.scanner.check_rules():
-                            break
-
-                        self.last_check_time = datetime.datetime.now()
 
                 except InterruptedError:
-                    # OK this happens when we get a SIGHUP and we're in the middle of a system call
                     pass
                 except Exception as e:
                     log.error("uncaught exception: {} ({})".format(e, type(e)))
@@ -770,6 +761,25 @@ class YaraScannerServer(object):
             # encode and submit the JSON result of the client
             #print(self.scanner.scan_results)
             send_data_block(client_socket, pickle.dumps(self.scanner.scan_results))
+
+    def start_rules_monitor(self):
+        """Starts a thread the monitor the yara rules. When it detects the yara rules
+           have changed it creates a new YaraScanner and swaps it in (for self.scanner)."""
+
+        self.rule_monitor_thread = threading.Thread(target=self.rule_monitor_loop, 
+                                                    name='Scanner {} Rules Monitor'.format(self.cpu_index),
+                                                    daemon=True)
+        self.rule_monitor_thread.start()
+
+    def rule_monitor_loop(self):
+        while not self.shutdown.is_set():
+            log.debug('checking for new rules...')
+            
+            # do we need to reload the yara rules?
+            if self.scanner.check_rules():
+                self.initialize_scanner()
+
+            self.shutdown.wait(self.update_frequency)
 
 def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_dir=DEFAULT_SOCKET_DIR):
     # pick a random scanner
@@ -970,7 +980,7 @@ def main():
                 else:
                     print(file_path)
                     for match in scanner.scan_results:
-                        print('\t{0}'.format(match['rule']))
+                        print('\t{}'.format(match['rule']))
         except Exception as e:
             log.error("scan failed for {}: {}".format(file_path, e))
             exit_result = 1
