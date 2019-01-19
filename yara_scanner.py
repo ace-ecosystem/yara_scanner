@@ -522,6 +522,9 @@ class YaraScannerServer(object):
         # set to True to gracefully shutdown
         self.shutdown = multiprocessing.Event()
 
+        # set to True to gracefully shutdown the current scanner (used for reloading)
+        self.current_scanner_shutdown = None # threading.Event
+
         # primary scanner controller
         self.process_manager = None
 
@@ -560,9 +563,6 @@ class YaraScannerServer(object):
         # the scanner we're using for this process
         self.scanner = None
 
-        # set to True when we receive a SIGHUP
-        self.sighup  = False
-
         # set to True when we receive a SIGUSR1
         self.sigusr1 = False
 
@@ -573,6 +573,11 @@ class YaraScannerServer(object):
     #
 
     def run_process_manager(self):
+        def term_handler(signum, frame):
+            self.shutdown.set()
+
+        signal.signal(signal.SIGTERM, term_handler)
+            
         try:
             while not self.shutdown.is_set():
                 try:
@@ -628,6 +633,7 @@ class YaraScannerServer(object):
             return
 
         try:
+            log.info("closing server socket")
             self.server_socket.close()
         except Exception as e:
             log.error("unable to close server socket: {}".format(e))
@@ -652,13 +658,13 @@ class YaraScannerServer(object):
         log.info("started process manager on pid {}".format(self.process_manager.pid))
 
     def stop(self):
-        # already stopped?
-        if self.shutdown.is_set():
-            return
+        if not self.shutdown.is_set():
+            self.shutdown.set()
 
-        self.shutdown.set()
         log.info("waiting for process manager to exit...")
-        self.process_manager.join()
+        if self.process_manager:
+            self.process_manager.join()
+            self.process_manager = None
 
         # process manager waits for the child processes to exit so we're done at this point
 
@@ -666,9 +672,11 @@ class YaraScannerServer(object):
         self.cpu_index = cpu_index # starting at 0
 
         def handler(signum, frame):
-            self.sighup = True
+            self.current_scanner_shutdown.set()
 
         signal.signal(signal.SIGHUP, handler)
+
+        self.current_scanner_shutdown = threading.Event()
 
         try:
             # load up the yara scanner
@@ -681,18 +689,20 @@ class YaraScannerServer(object):
                 try:
                     self.execute()
 
-                    if self.sighup:
-                        log.info("caught sighup in {}: exiting...".format(os.getpid()))
+                    if self.current_scanner_shutdown.is_set():
+                        log.info("got signal to reload rules: exiting...")
                         break
 
                 except InterruptedError:
                     pass
+
                 except Exception as e:
                     log.error("uncaught exception: {} ({})".format(e, type(e)))
 
         except KeyboardInterrupt:
             log.info("caught keyboard interrupt - exiting")
 
+        self.stop_rules_monitor()
         self.kill_server_socket()
 
     def execute(self):
@@ -768,24 +778,45 @@ class YaraScannerServer(object):
 
         self.rule_monitor_thread = threading.Thread(target=self.rule_monitor_loop, 
                                                     name='Scanner {} Rules Monitor'.format(self.cpu_index),
-                                                    daemon=True)
+                                                    daemon=False)
         self.rule_monitor_thread.start()
 
     def rule_monitor_loop(self):
-        while not self.shutdown.is_set():
-            log.debug('checking for new rules...')
-            
-            # do we need to reload the yara rules?
-            if self.scanner.check_rules():
-                self.initialize_scanner()
+        log.debug("starting rules monitoring")
+        counter = 0
 
-            self.shutdown.wait(self.update_frequency)
+        while True:
+            if self.shutdown.is_set():
+                break
+
+            if self.current_scanner_shutdown.is_set():
+                break
+
+            if counter >= self.update_frequency:
+                log.debug('checking for new rules...')
+            
+                # do we need to reload the yara rules?
+                if self.scanner.check_rules():
+                    self.current_scanner_shutdown.set()
+                    break
+
+                counter = 0
+
+            counter += 1
+            self.shutdown.wait(1)
+
+        log.debug("stopped rules monitoring")
+
+    def stop_rules_monitor(self):
+        self.current_scanner_shutdown.set()
+        self.rule_monitor_thread.join(5)
+        if self.rule_monitor_thread.is_alive():
+            log.error("unable to stop rule monitor thread")
 
 def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_dir=DEFAULT_SOCKET_DIR):
     # pick a random scanner
     # it doesn't matter which one, as long as the load is evenly distributed
     starting_index = scanner_index = random.randrange(multiprocessing.cpu_count())
-    second_try = False
 
     while True:
         socket_path = os.path.join(base_dir, socket_dir, str(scanner_index))
@@ -824,15 +855,9 @@ def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_
 
             # if we've swung back around wait for a few seconds and try again
             if scanner_index == starting_index:
-                if not second_try:
-                    log.info("waiting for available yara scanners...")
-                    time.sleep(3)
-                    second_try = True
-                    continue
-
-                else:
-                    # if we've swung back ground a second time then something is wrong
-                    raise e
+                log.info("waiting for available yara scanners...")
+                time.sleep(1)
+                continue
 
             continue
 
