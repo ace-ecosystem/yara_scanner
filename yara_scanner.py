@@ -337,7 +337,7 @@ class YaraScanner(object):
 
         # scan the data stream
         # external variables come from the profile points added to the file
-        yara_matches = self.rules.match(file_path, externals=external_vars, timeout=5)
+        yara_matches = self.rules.match(data=data, externals=external_vars, timeout=5)
         return self._scan(None, data, yara_matches, yara_stdout_file, yara_stderr_file, external_vars)
 
     def _scan(self, 
