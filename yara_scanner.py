@@ -96,7 +96,7 @@ class YaraScanner(object):
         else:
             self.tracked_files[file_path] = os.path.getmtime(file_path)
 
-        log.debug("yara file {} tracked @ {1}".format(file_path, self.tracked_files[file_path]))
+        log.debug("yara file {} tracked @ {}".format(file_path, self.tracked_files[file_path]))
 
     def track_yara_dir(self, dir_path):
         """Adds all files in a given directory that end with .yar when converted to lowercase.  All files are monitored for changes to mtime, as well as new and removed files."""
