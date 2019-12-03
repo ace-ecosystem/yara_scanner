@@ -8,7 +8,7 @@ install
    pip3 install yara_scanner
 - **git clone option**
 
-   git clone https://github.com/IntegralDefense/yara_scanner.git
+   git clone https://github.com/ace-ecosystem/yara_scanner.git
 
    cd yara_scanner
 
