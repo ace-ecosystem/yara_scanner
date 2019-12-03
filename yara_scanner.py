@@ -573,11 +573,12 @@ class YaraScannerServer(object):
     #
 
     def run_process_manager(self):
-        def term_handler(signum, frame):
+        def _handler(signum, frame):
             self.shutdown.set()
 
-        signal.signal(signal.SIGTERM, term_handler)
-            
+        signal.signal(signal.SIGTERM, _handler)
+        signal.signal(signal.SIGINT, _handler)
+
         try:
             while not self.shutdown.is_set():
                 try:
@@ -607,6 +608,7 @@ class YaraScannerServer(object):
 
         for i, scanner in enumerate(self.servers):
             if scanner is None:
+                logging.info("starting scanner on cpu {}".format(i))
                 self.servers[i] = multiprocessing.Process(target=self.run, name="Yara Scanner Server ({})".format(i), args=(i,))
                 self.servers[i].start()
                 log.info("started scanner on cpu {} with pid {}".format(i, self.servers[i].pid))
@@ -661,20 +663,24 @@ class YaraScannerServer(object):
         if not self.shutdown.is_set():
             self.shutdown.set()
 
-        log.info("waiting for process manager to exit...")
+        self.wait()
+        # process manager waits for the child processes to exit so we're done at this point
+
+    def wait(self, timeout=None):
+        log.debug("waiting for process manager to exit...")
         if self.process_manager:
             self.process_manager.join()
             self.process_manager = None
 
-        # process manager waits for the child processes to exit so we're done at this point
-
     def run(self, cpu_index):
         self.cpu_index = cpu_index # starting at 0
 
-        def handler(signum, frame):
+        def _handler(signum, frame):
             self.current_scanner_shutdown.set()
 
-        signal.signal(signal.SIGHUP, handler)
+        signal.signal(signal.SIGHUP, _handler)
+        signal.signal(signal.SIGTERM, _handler)
+        signal.signal(signal.SIGINT, _handler)
 
         self.current_scanner_shutdown = threading.Event()
 
@@ -855,9 +861,8 @@ def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_
 
             # if we've swung back around wait for a few seconds and try again
             if scanner_index == starting_index:
-                log.info("waiting for available yara scanners...")
-                time.sleep(1)
-                continue
+                log.error("no scanners available")
+                raise
 
             continue
 
