@@ -14,7 +14,7 @@ from setuptools import setup
 from codecs import open
 from os import path
 
-__version__ = "1.0.13"
+__version__ = "1.0.14"
 description = "A Python wrapper library for libyara and a local server for " \
               "fully utilizing the CPUs of the system to scan with yara."
 
@@ -33,7 +33,7 @@ setup(
     version=__version__,
 
     description=description,
-    long_description=long_description,
+    long_description=description,
 
     # The project's main homepage.
     url='https://github.com/IntegralDefense/yara_scanner',
