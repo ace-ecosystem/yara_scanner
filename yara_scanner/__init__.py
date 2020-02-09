@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # vim: sw=4:ts=4:et:cc=120
+__version__ = '1.0.14'
 
 import json
 import logging
@@ -10,9 +11,23 @@ import threading
 
 from subprocess import Popen, PIPE
 
-# requires python-yara version 3.8
 import plyara
 import yara
+
+RESULT_KEY_TARGET = 'target'
+RESULT_KEY_META = 'meta'
+RESULT_KEY_NAMESPACE = 'namespace'
+RESULT_KEY_RULE = 'rule'
+RESULT_KEY_STRINGS = 'strings'
+RESULT_KEY_TAGS = 'tags'
+ALL_RESULT_KEYS = [
+    RESULT_KEY_TARGET,
+    RESULT_KEY_META,
+    RESULT_KEY_NAMESPACE,
+    RESULT_KEY_RULE,
+    RESULT_KEY_STRINGS,
+    RESULT_KEY_TAGS,
+]
 
 yara.set_config(max_strings_per_rule=30720)
 log = logging.getLogger('yara-scanner')
@@ -130,6 +145,10 @@ class YaraScanner(object):
 
     def check_rules(self):
         """Returns True if the rules need to be recompiled, False otherwise."""
+        # if we don't have a context yet then we def need to compile the rules
+        if self.rules is None:
+            return True
+
         reload_rules = False # final result to return
 
         for file_path in self.tracked_files.keys():
@@ -301,7 +320,7 @@ class YaraScanner(object):
             for error_message, buffer_type, file_path, yara_rule in execution_errors:
                 print("{}:{} <{}> {}".format(file_path, yara_rule, buffer_type, error_message))
 
-            return
+            return False
 
         for namespace in sources.keys():
             sources[namespace] = '\r\n'.join(sources[namespace])
@@ -309,9 +328,11 @@ class YaraScanner(object):
         try:
             log.info("loading {} rules".format(rule_count))
             self.rules = yara.compile(sources=sources)
+            return True
         except Exception as e:
             log.error("unable to compile all yara rules combined: {}".format(str(e)))
             self.rules = None
+            return False
 
     # we're keeping things backwards compatible here...
     def scan(self, 
