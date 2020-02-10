@@ -48,7 +48,7 @@ jobs:
             . venv/bin/activate
             pytest --junitxml=test-results/yara-scanner-test.xml tests/*
       - store_test_results:
-          path: test_results
+          path: test-results/yara-scanner-test.xml
       - store_artifacts:
           path: test-results
           destination: test-results
