@@ -58,7 +58,23 @@ class YaraJSONEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, o)
 
 class YaraScanner(object):
+    """The primary object used for scanning files and data with yara rules."""
     def __init__(self, signature_dir=None, thread_count=None, test_mode=False):
+        """
+        Creates a new YaraScanner object.
+
+        :param signature_dir: A directory that contains one directory per set of yara rules. 
+        Each subdirectory will get loaded into its own namespace (named after the path to the directory.)
+
+        :type signature_dir: str or None
+        
+        :param thread_count: Depracated.
+        
+        :param test_mode: When set to True, each yara rule is tested for performance issued when it is loaded.
+        
+        :type test_mode: bool
+
+        """
         self.rules = None
         self.scan_results = []
 
