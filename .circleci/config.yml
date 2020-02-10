@@ -37,7 +37,7 @@ jobs:
             python3 -m venv venv
             . venv/bin/activate
             pip install poetry
-            poetry install --dev --no-interaction --no-ansi
+            poetry install --no-interaction --no-ansi
       - save_cache:
           paths:
             - ./venv
