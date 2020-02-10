@@ -14,6 +14,7 @@ from subprocess import Popen, PIPE
 import plyara
 import yara
 
+# keys to the JSON dicts you get back from YaraScanner.scan_results
 RESULT_KEY_TARGET = 'target'
 RESULT_KEY_META = 'meta'
 RESULT_KEY_NAMESPACE = 'namespace'
