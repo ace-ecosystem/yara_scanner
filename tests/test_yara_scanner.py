@@ -66,4 +66,57 @@ def test_file_scan_results(scanner, shared_datadir):
     assert scanner.scan_results[0][RESULT_KEY_STRINGS] == [(0, '$', b'test_rule_1')]
     assert scanner.scan_results[0][RESULT_KEY_TAGS] == ['tag_1']
 
+def test_single_file_tracking(scanner, shared_datadir):
+    s = YaraScanner()
+    yara_rule_path = str(shared_datadir / 'signatures' / 'ruleset_a' / 'rule_1.yar')
+    s.track_yara_file(yara_rule_path)
+    s.load_rules()
+    assert not s.check_rules()
+    assert s.tracked_files
+    assert yara_rule_path in s.tracked_files
+    with open(yara_rule_path, 'a') as fp:
+        fp.write('\n//test')
 
+    # this should return True after the file has been modified
+    assert s.check_rules()
+    s.load_rules()
+    assert not s.check_rules()
+    with open(yara_rule_path, 'r') as fp:
+        rule_content = fp.read()
+
+    os.remove(yara_rule_path)
+    assert s.check_rules()
+    assert s.tracked_files[yara_rule_path] is None
+    assert not s.load_rules()
+
+    with open(yara_rule_path, 'w') as fp:
+        fp.write(rule_content)
+
+    assert s.check_rules()
+    assert s.load_rules()
+
+def test_dir_tracking(shared_datadir):
+    s = YaraScanner()
+    yara_dir_path = str(shared_datadir / 'signatures' / 'ruleset_a')
+    yara_rule_path = str(shared_datadir / 'signatures' / 'ruleset_a' / 'rule_1.yar')
+    s.track_yara_dir(yara_dir_path)
+    s.load_rules()
+    assert not s.check_rules()
+    assert s.tracked_dirs
+    assert len(s.tracked_dirs[yara_dir_path]) == 1
+    
+    with open(yara_rule_path, 'a') as fp:
+        fp.write('\ntest')
+
+    # this should return True after the file has been modified
+    assert s.check_rules()
+    s.load_rules()
+    assert not s.check_rules()
+    
+    os.remove(yara_rule_path)
+
+    # this should return True after the file has been deleted
+    assert s.check_rules()
+    # when files are deleted from a tracked dir they are removed from the dict tracking
+    assert not s.tracked_dirs[yara_dir_path]
+    assert not s.load_rules()

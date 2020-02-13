@@ -129,6 +129,8 @@ class YaraScanner(object):
         """Adds a single yara file.  The file is then monitored for changes to mtime, removal or adding."""
         if not os.path.exists(file_path):
             self.tracked_files[file_path] = None # file did not exist when we started tracking
+            # we keep track of the path by keeping the key in the dictionary
+            # so that if the file comes back we'll reload it
         else:
             self.tracked_files[file_path] = os.path.getmtime(file_path)
 
@@ -169,20 +171,22 @@ class YaraScanner(object):
         Returns True if the rules need to be recompiled, False otherwise. The criteria that determines if the rules are recompiled depends on how they are tracked.
         
         :rtype: bool"""
-        # if we don't have a context yet then we def need to compile the rules
-        if self.rules is None:
-            return True
 
         reload_rules = False # final result to return
 
         for file_path in self.tracked_files.keys():
-            if self.tracked_files[file_path] is not None and not os.path.exists(file_path):
-                log.info("detected deleted yara file {}".format(file_path))
+            # did the file come back?
+            if self.tracked_files[file_path] is None and os.path.exists(file_path):
+                log.info(f"detected recreated yara file {file_path}")
+                self.track_yara_file(file_path)
+            # was the file deleted?
+            elif self.tracked_files[file_path] is not None and not os.path.exists(file_path):
+                log.info(f"detected deleted yara file {file_path}")
                 self.track_yara_file(file_path)
                 reload_rules = True
-
+            # was the file modified?
             elif os.path.getmtime(file_path) != self.tracked_files[file_path]:
-                log.info("detected change in yara file {}".format(file_path))
+                log.info(f"detected change in yara file {file_path}")
                 self.track_yara_file(file_path)
                 reload_rules = True
 
@@ -225,6 +229,10 @@ class YaraScanner(object):
                 self.track_yara_repository(repo_path)
                 reload_rules = True
 
+        # if we don't have a yara context yet then we def need to compile the rules
+        if self.rules is None:
+            return True
+            
         return reload_rules
 
     def load_rules(self):
@@ -239,13 +247,16 @@ class YaraScanner(object):
         # we load all the rules into memory as a string to be compiled
         sources = {}
         rule_count = 0
+        file_count = 0
 
         # get the list of all the files to compile
         all_files = {} # key = "namespace", value = [] of file_paths
         # XXX there's a bug in yara where using an empty string as the namespace causes a segfault
-        all_files['DEFAULT'] = self.tracked_files.keys()
+        all_files['DEFAULT'] = [ _ for _ in self.tracked_files.keys() if self.tracked_files[_] is not None]
+        file_count += len(all_files['DEFAULT'])
         for dir_path in self.tracked_dirs.keys():
             all_files[dir_path] = self.tracked_dirs[dir_path]
+            file_count += len(self.tracked_dirs[dir_path])
 
         for repo_path in self.tracked_repos.keys():
             all_files[repo_path] = []
@@ -253,6 +264,13 @@ class YaraScanner(object):
                 file_path = os.path.join(repo_path, file_path)
                 if file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara'):
                     all_files[repo_path].append(file_path)
+                    file_count += 1
+
+        # if we have no files to compile then we have nothing to do
+        if file_count == 0:
+            logging.debug("no files to compile")
+            self.rules = None
+            return False
 
         if self.test_mode:
             execution_times = [] # of (total_seconds, buffer_type, file_name, rule_name)
