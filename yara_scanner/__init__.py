@@ -68,7 +68,7 @@ class YaraScanner(object):
         """
         Creates a new YaraScanner object.
 
-        :param signature_dir: A directory that contains one directory per set of yara rules. Each subdirectory will get loaded into its own namespace (named after the path to the directory.)
+        :param signature_dir: A directory that contains one directory per set of yara rules. Each subdirectory will get loaded into its own namespace (named after the path to the directory.) This is for convenience. Also see :func:`YaraScanner.track_yara_file`, :func:`YaraScanner.track_yara_dir`, and :func:`YaraScanner.track_yara_repo`.
 
         :type signature_dir: str or None
         
@@ -99,8 +99,6 @@ class YaraScanner(object):
         self.test_mode = test_mode
         
         if signature_dir is not None:
-            #log.warning("using old signature_dir parameter to YaraScanner.__init__")
-            # in the old system a single directory containing yara rule sub directories was used
             for dir_path in os.listdir(signature_dir):
                 dir_path = os.path.join(signature_dir, dir_path)
                 if not os.path.isdir(dir_path):

@@ -1,21 +1,30 @@
 import os.path
+import shutil
+from subprocess import Popen
 
-import pytest 
+import pytest
 
-from yara_scanner import __version__, YaraScanner, \
-    ALL_RESULT_KEYS, \
-    RESULT_KEY_META, \
-    RESULT_KEY_NAMESPACE, \
-    RESULT_KEY_RULE, \
-    RESULT_KEY_STRINGS, \
-    RESULT_KEY_TAGS, \
-    RESULT_KEY_TARGET
+from yara_scanner import (ALL_RESULT_KEYS, RESULT_KEY_META,
+                          RESULT_KEY_NAMESPACE, RESULT_KEY_RULE,
+                          RESULT_KEY_STRINGS, RESULT_KEY_TAGS,
+                          RESULT_KEY_TARGET, YaraScanner, __version__)
+
 
 @pytest.fixture
 def scanner(shared_datadir):
     s = YaraScanner(signature_dir=str(shared_datadir / 'signatures'))
     s.load_rules()
     return s
+
+@pytest.fixture
+def repo(shared_datadir):
+    repo_path = str(shared_datadir / 'signatures' / 'ruleset_a')
+    Popen(['git', '-C', repo_path, 'init']).wait()
+    Popen(['git', '-C', repo_path, 'config', 'user.name', 'Test User']).wait()
+    Popen(['git', '-C', repo_path, 'config', 'user.email', 'test_user@localhost']).wait()
+    Popen(['git', '-C', repo_path, 'add', '*.yar']).wait()
+    Popen(['git', '-C', repo_path, 'commit', '-m', 'initial commit']).wait()
+    return repo_path
 
 def test_version():
     assert __version__ == '1.0.14'
@@ -120,3 +129,21 @@ def test_dir_tracking(shared_datadir):
     # when files are deleted from a tracked dir they are removed from the dict tracking
     assert not s.tracked_dirs[yara_dir_path]
     assert not s.load_rules()
+
+@pytest.mark.skipif(not shutil.which('git'), reason="missing git in PATH")
+def test_repo_tracking(repo):
+    s = YaraScanner()
+    s.track_yara_repository(repo)
+    assert s.check_rules()
+    assert s.load_rules()
+    assert not s.check_rules()
+    with open(os.path.join(repo, 'rule_1.yar'), 'a') as fp:
+        fp.write('\n// modified')
+    
+    # not considered modified until changes committed to repo
+    assert not s.check_rules()
+    Popen(['git', '-C', repo, 'add', '*.yar']).wait()
+    Popen(['git', '-C', repo, 'commit', '-m', 'modified']).wait()
+    assert s.check_rules()
+    assert s.load_rules()
+    assert not s.check_rules()
