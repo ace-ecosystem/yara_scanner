@@ -249,7 +249,7 @@ python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
 version = "1.8.1"
 
 [[package]]
-category = "dev"
+category = "main"
 description = "Pygments is a syntax highlighting package written in Python."
 name = "pygments"
 optional = false
@@ -520,7 +520,7 @@ docs = ["sphinx", "jaraco.packaging (>=3.2)", "rst.linker (>=1.9)"]
 testing = ["jaraco.itertools"]
 
 [metadata]
-content-hash = "ce1a7f9cea8b4d4b6a48db75eb3069999e1d0de0fb522ebaa4865fe21e97a596"
+content-hash = "b4e2503ca595c3c1677ca66c23bacbc98f8be48f30fb3818f9d28e98fd2c8fb7"
 python-versions = "^3.6"
 
 [metadata.files]

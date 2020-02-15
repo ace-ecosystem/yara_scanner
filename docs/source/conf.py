@@ -59,3 +59,6 @@ html_static_path = ['_static']
 intersphinx_mapping = {'python': ('https://docs.python.org/3', None)}
 # Both the class’ and the __init__ method’s docstring are concatenated and inserted.
 autoclass_content = 'both'
+
+autodoc_inherit_docstrings = False
+

@@ -9,6 +9,15 @@ from yara_scanner import (ALL_RESULT_KEYS, RESULT_KEY_META,
                           RESULT_KEY_STRINGS, RESULT_KEY_TAGS,
                           RESULT_KEY_TARGET, YaraScanner, __version__)
 
+def create_file(path, content):
+    dir = os.path.dirname(path)
+    if not os.path.isdir(dir):
+        os.makedirs(dir)
+
+    with open(path, 'w') as fp:
+        fp.write(content)
+
+    return path
 
 @pytest.fixture
 def scanner(shared_datadir):
@@ -74,6 +83,12 @@ def test_file_scan_results(scanner, shared_datadir):
     assert scanner.scan_results[0][RESULT_KEY_RULE] == 'rule_1'
     assert scanner.scan_results[0][RESULT_KEY_STRINGS] == [(0, '$', b'test_rule_1')]
     assert scanner.scan_results[0][RESULT_KEY_TAGS] == ['tag_1']
+
+def test_yara_rule_blacklisting(scanner):
+    assert scanner.scan_data('test_rule_1')
+    scanner.blacklist_rule('rule_1')
+    scanner.load_rules()
+    assert not scanner.scan_data('test_rule_1')
 
 def test_single_file_tracking(scanner, shared_datadir):
     s = YaraScanner()
@@ -147,3 +162,300 @@ def test_repo_tracking(repo):
     assert s.check_rules()
     assert s.load_rules()
     assert not s.check_rules()
+
+#region meta_rule_tests
+meta_rule_tests = [
+    ("""
+rule test_meta_filename {
+meta:
+    file_name = "scan_target_1.txt"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'scan_target_1.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_filename_multi {
+meta:
+    file_name = "scan_target_1.txt,scan_target_2.txt"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'scan_target_1.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_filename_not {
+meta:
+    file_name = "!scan_target_1.txt"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'scan_target_1.txt', 
+    'Sample content.',
+    False),
+    ("""
+rule test_meta_filename_not_multi {
+meta:
+    file_name = "!scan_target_1.txt,scan_target_2.txt"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'scan_target_2.txt', 
+    'Sample content.',
+    False),
+    ("""
+rule test_meta_filename_not_multi {
+meta:
+    file_name = "!scan_target_1.txt,scan_target_2.txt"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'scan_target_3.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_filename_sub {
+meta:
+    file_name = "sub:scan_target_1."
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'scan_target_1.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_filename_re {
+meta:
+    file_name = "re:^scan_target_1"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'scan_target_1.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_filename_re {
+meta:
+    file_name = "re:^scan_target_1"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'scan_target_2.txt', 
+    'Sample content.',
+    False),
+    ("""
+rule test_meta_filename_re {
+meta:
+    file_name = "!re:^scan_target_1"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'scan_target_2.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_filepath_sub {
+meta:
+    full_path = "sub:data/scan_target_1.txt"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_1.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_filepath_sub_multi {
+meta:
+    full_path = "sub:data/scan_target_1.txt,data/scan_target_2.txt"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_2.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_filepath_re {
+meta:
+    full_path = "re:data/scan_target_[0-9]+.txt"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_1.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_fileext {
+meta:
+    file_ext = "txt"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_1.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_fileext_multi {
+meta:
+    file_ext = "txt,pdf,doc"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_1.doc', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_mime {
+meta:
+    mime_type = "text/plain"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_1.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_mime_multi {
+meta:
+    mime_type = "text/plain,text/html"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_1.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_mime {
+meta:
+    mime_type = "re:^text/.+"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_1.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_multi_meta {
+meta:
+    file_name = "scan_target_1.txt"
+    mime_type = "text/plain"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_1.txt', 
+    'Sample content.',
+    True),
+    ("""
+rule test_meta_multi_meta {
+meta:
+    file_name = "scan_target_1.txt"
+    mime_type = "text/plain"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_2.txt', 
+    'Sample content.',
+    False),
+    ("""
+rule test_meta_multi_meta {
+meta:
+    file_name = "!scan_target_1.txt"
+    mime_type = "text/plain"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_1.txt', 
+    'Sample content.',
+    False),
+    ("""
+rule test_meta_multi_meta {
+meta:
+    file_name = "!scan_target_1.txt"
+    mime_type = "text/plain"
+strings:
+    $ = "Sample content."
+condition:
+    all of them
+}
+    """, 
+    'data/scan_target_2.txt', 
+    'Sample content.',
+    True),
+]
+#endregion
+
+@pytest.mark.parametrize("yara_rule_content, scan_target_name, scan_target_content, expected", meta_rule_tests)
+def test_meta_directives(tmp_path, yara_rule_content, scan_target_name, scan_target_content, expected):
+    s = YaraScanner()
+    yara_rule_path = create_file(str(tmp_path / 'rule.yar'), yara_rule_content)
+    scan_target_path = create_file(str(tmp_path / scan_target_name), scan_target_content)
+    s.track_yara_file(yara_rule_path)
+    s.load_rules()
+
+    if expected:
+        assert s.scan(scan_target_path)
+        assert len(s.scan_results) == 1
+    else:
+        assert not s.scan(scan_target_path)
+        assert len(s.scan_results) == 0
