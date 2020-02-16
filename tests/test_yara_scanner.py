@@ -36,7 +36,7 @@ def repo(shared_datadir):
     return repo_path
 
 def test_version():
-    assert __version__ == '1.0.14'
+    assert __version__ == '1.0.15'
 
 def test_signature_dir_load(scanner):
     # there should be two loaded directories
