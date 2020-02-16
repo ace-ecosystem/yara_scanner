@@ -47,9 +47,9 @@ sphinx = "^2.4.0"
 # command line scanner
 scan = "yara_scanner:main"
 # yara scanner server client
-ysc = "ysc.main"
+ysc = "ysc:main"
 # yara scanner server
-yss = "yss.main"
+yss = "yss:main"
 
 [build-system]
 requires = ["poetry>=0.12"]
