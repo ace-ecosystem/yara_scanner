@@ -1,0 +1,60 @@
+# Python CircleCI 2.0 configuration file
+#
+# Check https://circleci.com/docs/2.0/language-python/ for more details
+#
+
+version: 2
+jobs:
+  test:
+    docker:
+      # specify the version you desire here
+      # use `-browsers` prefix for selenium tests, e.g. `3.6.1-browsers`
+      - image: circleci/python:3.6.1
+
+      # Specify service dependencies here if necessary
+      # CircleCI maintains a library of pre-built images
+      # documented at https://circleci.com/docs/2.0/circleci-images/
+      # - image: circleci/postgres:9.4
+
+    working_directory: ~/repo
+
+    steps:
+      - checkout
+
+      # Download and cache dependencies
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "pyproject.toml" }}
+            # fallback to using the latest cache if no exact match is found
+            - v1-dependencies-
+      - run:
+          name: setup environment
+          command: |
+            export PYTHONPATH=$(pwd):$(pwd)/yara_scanner
+      - run:
+          name: install dependencies
+          command: |
+            python3 -m venv venv
+            . venv/bin/activate
+            pip install poetry
+            poetry install --no-interaction --no-ansi
+      - save_cache:
+          paths:
+            - ./venv
+          key: v1-dependencies-{{ checksum "pyproject.toml" }}
+      - run:
+          name: test
+          command: |
+            . venv/bin/activate
+            pytest --junitxml=test-results/yara-scanner-test.xml tests/*
+      - store_test_results:
+          path: test-results/yara-scanner-test.xml
+      - store_artifacts:
+          path: test-results
+          destination: test-results
+
+workflows:
+  version: 2
+  test:
+    jobs:
+      - test

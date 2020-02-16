@@ -1,18 +1,75 @@
 #!/usr/bin/env python3
 # vim: sw=4:ts=4:et:cc=120
+__version__ = '1.0.15'
+__doc__ = """
+Yara Scanner
+============
 
+A wrapper around the yara library for Python. ::
+
+    scanner = YaraScanner()
+    # start tracking this yara file
+    scanner.track_yara_file('/path/to/yara_file.yar')
+    scanner.load_rules()
+    scanner.scan('/path/to/file/to/scan')
+
+    # check to see if your yara file changed
+    if scanner.check_rules():
+        scanner.load_rules()
+
+    # track an entire directory of yara files
+    scanner.track_yara_dir('/path/to/directory')
+    scanner.load_rules()
+    # did any of the yara files in this directory change?
+    if scanner.check_rules():
+        scanner.load_rules()
+
+    # track a git repository of yara rules
+    scanner.track_yara_repo('/path/to/git_repo')
+    scanner.load_rules()
+    # this only returns True if a new commit was added since the last check
+    if scanner.check_rules():
+        scanner.load_rules()
+
+"""
+
+import datetime
+import functools
 import json
 import logging
+import multiprocessing
 import os
 import os.path
+import pickle
+import random
 import re
+import shutil
+import signal
+import socket
+import struct
 import threading
+import time
+import traceback
+from subprocess import PIPE, Popen
 
-from subprocess import Popen, PIPE
-
-# requires python-yara version 3.8
 import plyara
 import yara
+
+# keys to the JSON dicts you get back from YaraScanner.scan_results
+RESULT_KEY_TARGET = 'target'
+RESULT_KEY_META = 'meta'
+RESULT_KEY_NAMESPACE = 'namespace'
+RESULT_KEY_RULE = 'rule'
+RESULT_KEY_STRINGS = 'strings'
+RESULT_KEY_TAGS = 'tags'
+ALL_RESULT_KEYS = [
+    RESULT_KEY_TARGET,
+    RESULT_KEY_META,
+    RESULT_KEY_NAMESPACE,
+    RESULT_KEY_RULE,
+    RESULT_KEY_STRINGS,
+    RESULT_KEY_TAGS,
+]
 
 yara.set_config(max_strings_per_rule=30720)
 log = logging.getLogger('yara-scanner')
@@ -35,17 +92,30 @@ def get_current_repo_commit(repo_dir):
 class YaraJSONEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, bytes):
-            try:
-                return o.decode('unicode_escape')
-            except UnicodeDecodeError:
-                return o.decode('cp437')
+            return o.decode('utf-8', errors='backslashreplace')
 
         return json.JSONEncoder.default(self, o)
 
 class YaraScanner(object):
+    """
+    The primary object used for scanning files and data with yara rules."""
     def __init__(self, signature_dir=None, thread_count=None, test_mode=False):
+        """
+        Creates a new YaraScanner object.
+
+        :param signature_dir: A directory that contains one directory per set of yara rules. Each subdirectory will get loaded into its own namespace (named after the path to the directory.) This is for convenience. Also see :func:`YaraScanner.track_yara_file`, :func:`YaraScanner.track_yara_dir`, and :func:`YaraScanner.track_yara_repo`.
+
+        :type signature_dir: str or None
+        
+        :param thread_count: Number of threads to use. *This parameter is ignored and no longer used.*
+        
+        :param test_mode: When set to True, each yara rule is tested for performance issued when it is loaded.
+        
+        :type test_mode: bool
+
+        """
         self.rules = None
-        self.scan_results = []
+        self._scan_results = []
 
         # we can pass in a list of "blacklisted" rules
         # this is a list of rule NAMES that are essentially ignored in the scan results (not output)
@@ -64,8 +134,6 @@ class YaraScanner(object):
         self.test_mode = test_mode
         
         if signature_dir is not None:
-            #log.warning("using old signature_dir parameter to YaraScanner.__init__")
-            # in the old system a single directory containing yara rule sub directories was used
             for dir_path in os.listdir(signature_dir):
                 dir_path = os.path.join(signature_dir, dir_path)
                 if not os.path.isdir(dir_path):
@@ -77,7 +145,45 @@ class YaraScanner(object):
                     self.track_yara_dir(dir_path)
 
     @property
+    def scan_results(self):
+        """Returns the scan results of the most recent scan.
+
+        This function returns a list of dict with the following format ::
+
+            {
+                'target': str,
+                'meta': dict,
+                'namespace': str,
+                'rule': str,
+                'strings': list,
+                'tags': list,
+            }
+        
+        **target** is the target of the scane. In the case of file scans then target will be the path to the file that was scanned. In the case of data (raw binary) scans, this will be an empty string.
+
+        **meta** is the dict of meta directives of the matching rule.
+
+        **namespace** is the namespace the rule is in. In the case of repo and directory tracking, this will be the path of the directory. Otherwise it has a hard coded value of DEFAULT. *Setting the namespace to the path of the directory allows yara rules with duplicate names in different directories to be added to the same yara context.*
+
+        **rule** is the name of the matching yara rule.
+
+        **strings** is a list of tuples representing the individual string matches in the following format. ::
+
+            (position, string_name, content)
+
+        where **position** is the byte position of the match, **string_name** is the name of the yara string that matched, and **content** is the binary content it matched.
+
+        **tags** is a list of tags contained in the matching rule.
+        """
+        return self._scan_results
+
+    @scan_results.setter
+    def scan_results(self, value):
+        self._scan_results = value
+
+    @property
     def blacklist(self):
+        """The list of yara rules configured as blacklisted. Rules that are blacklisted are not compiled and used."""
         return list(self._blacklisted_rules)
 
     @blacklist.setter
@@ -85,14 +191,26 @@ class YaraScanner(object):
         assert isinstance(value, list)
         self._blacklisted_rules = set(value)
 
+    def blacklist_rule(self, rule_name):
+        """Adds the given rule to the list of rules that are blacklisted. See :func:`YaraScanner.blacklist`."""
+        self._blacklisted_rules.add(rule_name)
+
     @property
     def json(self):
+        """Returns the current scan results as a JSON formatted string."""
         return json.dumps(self.scan_results, indent=4, sort_keys=True, cls=YaraJSONEncoder)
+
+    @functools.lru_cache()
+    def git_available(self):
+        """Returns True if git is available on the system, False otherwise."""
+        return shutil.which('git')
 
     def track_yara_file(self, file_path):
         """Adds a single yara file.  The file is then monitored for changes to mtime, removal or adding."""
         if not os.path.exists(file_path):
             self.tracked_files[file_path] = None # file did not exist when we started tracking
+            # we keep track of the path by keeping the key in the dictionary
+            # so that if the file comes back we'll reload it
         else:
             self.tracked_files[file_path] = os.path.getmtime(file_path)
 
@@ -115,7 +233,11 @@ class YaraScanner(object):
         log.debug("tracking directory {} with {} yara files".format(dir_path, len(self.tracked_dirs[dir_path])))
 
     def track_yara_repository(self, dir_path):
-        """Adds all files in a given directory that end with .yar when converted to lowercase.  Only changes to the current commit trigger rule reload."""
+        """Adds all files in a given directory **that is a git repository** that end with .yar when converted to lowercase.  Only commits to the repository trigger rule reload."""
+        if not self.git_available():
+            log.warning("git cannot be found: defaulting to track_yara_dir")
+            return self.track_yara_dir(dir_path)
+
         if not os.path.isdir(dir_path):
             log.error("{} is not a directory".format(dir_path))
             return False
@@ -129,17 +251,26 @@ class YaraScanner(object):
         log.debug("tracking git repo {} @ {}".format(dir_path, self.tracked_repos[dir_path]))
 
     def check_rules(self):
-        """Returns True if the rules need to be recompiled, False otherwise."""
+        """
+        Returns True if the rules need to be recompiled, False otherwise. The criteria that determines if the rules are recompiled depends on how they are tracked.
+        
+        :rtype: bool"""
+
         reload_rules = False # final result to return
 
         for file_path in self.tracked_files.keys():
-            if self.tracked_files[file_path] is not None and not os.path.exists(file_path):
-                log.info("detected deleted yara file {}".format(file_path))
+            # did the file come back?
+            if self.tracked_files[file_path] is None and os.path.exists(file_path):
+                log.info(f"detected recreated yara file {file_path}")
+                self.track_yara_file(file_path)
+            # was the file deleted?
+            elif self.tracked_files[file_path] is not None and not os.path.exists(file_path):
+                log.info(f"detected deleted yara file {file_path}")
                 self.track_yara_file(file_path)
                 reload_rules = True
-
+            # was the file modified?
             elif os.path.getmtime(file_path) != self.tracked_files[file_path]:
-                log.info("detected change in yara file {}".format(file_path))
+                log.info(f"detected change in yara file {file_path}")
                 self.track_yara_file(file_path)
                 reload_rules = True
 
@@ -182,20 +313,34 @@ class YaraScanner(object):
                 self.track_yara_repository(repo_path)
                 reload_rules = True
 
+        # if we don't have a yara context yet then we def need to compile the rules
+        if self.rules is None:
+            return True
+            
         return reload_rules
 
     def load_rules(self):
+        """
+        Loads and compiles all tracked yara rules. Returns True if the rules were loaded correctly, False otherwise.
+
+        Scans can be performed only after the rules are loaded.
+
+        :rtype: bool"""
+
         # load and compile the rules
         # we load all the rules into memory as a string to be compiled
         sources = {}
         rule_count = 0
+        file_count = 0
 
         # get the list of all the files to compile
         all_files = {} # key = "namespace", value = [] of file_paths
         # XXX there's a bug in yara where using an empty string as the namespace causes a segfault
-        all_files['DEFAULT'] = self.tracked_files.keys()
+        all_files['DEFAULT'] = [ _ for _ in self.tracked_files.keys() if self.tracked_files[_] is not None]
+        file_count += len(all_files['DEFAULT'])
         for dir_path in self.tracked_dirs.keys():
             all_files[dir_path] = self.tracked_dirs[dir_path]
+            file_count += len(self.tracked_dirs[dir_path])
 
         for repo_path in self.tracked_repos.keys():
             all_files[repo_path] = []
@@ -203,6 +348,13 @@ class YaraScanner(object):
                 file_path = os.path.join(repo_path, file_path)
                 if file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara'):
                     all_files[repo_path].append(file_path)
+                    file_count += 1
+
+        # if we have no files to compile then we have nothing to do
+        if file_count == 0:
+            logging.debug("no files to compile")
+            self.rules = None
+            return False
 
         if self.test_mode:
             execution_times = [] # of (total_seconds, buffer_type, file_name, rule_name)
@@ -301,7 +453,7 @@ class YaraScanner(object):
             for error_message, buffer_type, file_path, yara_rule in execution_errors:
                 print("{}:{} <{}> {}".format(file_path, yara_rule, buffer_type, error_message))
 
-            return
+            return False
 
         for namespace in sources.keys():
             sources[namespace] = '\r\n'.join(sources[namespace])
@@ -309,9 +461,11 @@ class YaraScanner(object):
         try:
             log.info("loading {} rules".format(rule_count))
             self.rules = yara.compile(sources=sources)
+            return True
         except Exception as e:
             log.error("unable to compile all yara rules combined: {}".format(str(e)))
             self.rules = None
+            return False
 
     # we're keeping things backwards compatible here...
     def scan(self, 
@@ -319,6 +473,19 @@ class YaraScanner(object):
         yara_stdout_file=None,
         yara_stderr_file=None,
         external_vars={}):
+        """
+        Scans the given file with the loaded yara rules. Returns True if at least one yara rule matches, False otherwise.
+
+        The ``scan_results`` property will contain the results of the scan.
+
+        :param file_path: The path to the file to scan.
+        :type file_path: str
+        :param yara_stdout_file: Ignored.
+        :param yara_stderr_file: Ignored.
+        :external_vars: dict of variables to pass to the scanner as external yara variables (typically used in the condition of the rule.)
+        :type external_vars: dict
+        :rtype: bool
+        """
 
         assert self.rules is not None
 
@@ -332,6 +499,19 @@ class YaraScanner(object):
         yara_stdout_file=None,
         yara_stderr_file=None,
         external_vars={}):
+        """
+        Scans the given data with the loaded yara rules. ``data`` can be either a str or bytes object. Returns True if at least one yara rule matches, False otherwise.
+
+        The ``scan_results`` property will contain the results of the scan.
+
+        :param data: The data to scan.
+        :type data: str or bytes
+        :param yara_stdout_file: Ignored.
+        :param yara_stderr_file: Ignored.
+        :external_vars: dict of variables to pass to the scanner as external yara variables (typically used in the condition of the rule.)
+        :type external_vars: dict
+        :rtype: bool
+        """
 
         assert self.rules is not None
 
@@ -347,7 +527,6 @@ class YaraScanner(object):
         yara_stdout_file=None,
         yara_stderr_file=None,
         external_vars={}):
-        """Returns True if at least one yara rule matched, False otherwise."""
 
         # if we didn't specify a file_path then we default to an empty string
         # that will be the case when we are scanning a data chunk
@@ -463,11 +642,11 @@ class YaraScanner(object):
         if yara_stdout_file is not None:
             try:
                 with open(yara_stdout_file, 'w') as fp:
-                    json.dump(self.scan_results, indent=4, sort_keys=True)
+                    json.dump(self.scan_results, fp, indent=4, sort_keys=True)
             except Exception as e:
                 log.error("unable to write to {}: {}".format(yara_stdout_file, str(e)))
             
-        return len(self.scan_results) != 0
+        return self.has_matches
 
     @property
     def has_matches(self):
@@ -498,15 +677,6 @@ class YaraScanner(object):
 # * a pickled result dictionary
 # then the server will close the connection
 
-import datetime
-import multiprocessing
-import pickle
-import random
-import signal
-import socket
-import struct
-import traceback
-import time
 
 COMMAND_FILE_PATH = b'1'
 COMMAND_DATA_STREAM = b'2'

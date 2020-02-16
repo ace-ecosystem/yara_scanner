@@ -105,3 +105,4 @@ venv.bak/
 
 *.swp
 etc/logging.ini
+.vscode/settings.json

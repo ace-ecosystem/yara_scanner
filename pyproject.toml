@@ -1,0 +1,57 @@
+[tool.poetry]
+name = "yara_scanner"
+version = "1.0.15"
+description = "A Python wrapper library for libyara and a local server for fully utilizing the CPUs of the system to scan with yara."
+authors = ["John Davison <unixfreak0037@gmail.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/ace-ecosystem/yara_scanner"
+repository = "https://github.com/ace-ecosystem/yara_scanner"
+readme = "README.md"
+keywords = ["yara"]
+classifiers=[
+        # How mature is this project? Common values are
+        #   3 - Alpha
+        #   4 - Beta
+        #   5 - Production/Stable
+        'Development Status :: 4 - Beta',
+
+        # Indicate who your project is intended for
+        'Intended Audience :: Developers',
+        "Intended Audience :: Information Technology",
+        'Operating System :: OS Independent',
+
+        # Pick your license as you wish (should match "license" above)
+        'License :: OSI Approved :: Apache Software License',
+
+        # Specify the Python versions you support here. In particular, ensure
+        # that you indicate whether you support Python 2, Python 3 or both.
+        'Programming Language :: Python :: 3.6',
+    ]
+
+include = [ "ysc.py", "yss.py" ]
+
+[tool.poetry.dependencies]
+python = "^3.6"
+psutil = "^5.6.7"
+yara-python = "^3.11.0"
+plyara = "^2.0.3"
+pygments = "^2.5.2"
+
+[tool.poetry.dev-dependencies]
+pytest = "^4.6"
+pylint = "^2.4.4"
+pytest-datadir = "^1.3.1"
+sphinx = "^2.4.0"
+
+[tool.poetry.scripts]
+# command line scanner
+scan = "yara_scanner:main"
+# yara scanner server client
+ysc = "ysc:main"
+# yara scanner server
+yss = "yss:main"
+
+[build-system]
+requires = ["poetry>=0.12"]
+build-backend = "poetry.masonry.api"
+
