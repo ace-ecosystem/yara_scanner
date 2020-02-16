@@ -31,7 +31,7 @@ if scanner.check_rules():
 ## Installation Instructions ##
 
 ```bash
-poetry install yara-scanner
+pip install yara-scanner
 ```
 
 ## Command Line Instructions ##
