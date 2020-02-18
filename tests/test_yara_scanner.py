@@ -145,6 +145,22 @@ def test_dir_tracking(shared_datadir):
     assert not s.tracked_dirs[yara_dir_path]
     assert not s.load_rules()
 
+    # test when a new rule is loaded
+    new_yara_rule_path = str(shared_datadir / 'signatures' / 'ruleset_a' / 'new_rule.yar')
+    with open(new_yara_rule_path, 'w') as fp:
+        fp.write("""
+    rule test_add_rule {
+        strings:
+            $ = "whatever"
+        condition:
+            all of them
+    }
+        """)
+
+    assert s.check_rules()
+    assert s.load_rules()
+    assert len(s.tracked_dirs[yara_dir_path]) == 1
+
 @pytest.mark.skipif(not shutil.which('git'), reason="missing git in PATH")
 def test_repo_tracking(repo):
     s = YaraScanner()
