@@ -479,8 +479,8 @@ class YaraScanner(object):
         try:
             if os.path.isfile(path):
                 log.info('Up to date compiled rules already exist at %s. Using those' % (path))
-            self.rules = yara.load(path)
-            return True
+                self.rules = yara.load(path)
+                return True
         except:
             log.warning(f'Failed to load compiled rules: {path}')
             
