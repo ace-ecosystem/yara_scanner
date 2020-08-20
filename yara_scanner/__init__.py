@@ -1114,8 +1114,8 @@ def main():
     parser.add_argument('--from-stdin', required=False, default=False, action='store_true', dest='from_stdin',
         help="Read the list of files to scan from stdin.")
 
-    parser.add_argument('--debug', dest='log_debug', default=False, action='store_true',
-        help="Log debug level messages.")
+    parser.add_argument('-v', '--verbose', action='count', default=0, 
+        help='Increase verbosity. Can specify multiple times for more verbose output')
     parser.add_argument('-j', '--dump-json', required=False, default=False, action='store_true', dest='dump_json',
         help="Dump JSON details of matches.  Otherwise just list the rules that hit.")
 
@@ -1143,7 +1143,9 @@ def main():
     if len(args.yara_rules) == 0 and len(args.yara_dirs) == 0 and len(args.yara_repos) == 0 and args.signature_dir is None:
         args.signature_dir = '/opt/signatures'
 
-    logging.basicConfig(level=logging.DEBUG if args.log_debug else logging.INFO)
+    log_levels = {0: logging.ERROR, 1: logging.WARNING, 2: logging.INFO, 3: logging.DEBUG}
+    log_level = min(max(args.verbose, 0), 3) #clamp to 0-3 inclusive
+    logging.basicConfig(level=log_levels[log_level])
 
     # load any blacklisting
     if args.blacklisted_rules_path is not None:
