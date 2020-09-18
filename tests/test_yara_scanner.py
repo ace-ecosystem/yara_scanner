@@ -463,15 +463,15 @@ condition:
 
 @pytest.mark.parametrize("yara_rule_content, scan_target_name, scan_target_content, expected", meta_rule_tests)
 def test_meta_directives(tmp_path, yara_rule_content, scan_target_name, scan_target_content, expected):
-    s = YaraScanner()
+    scanner = YaraScanner()
     yara_rule_path = create_file(str(tmp_path / 'rule.yar'), yara_rule_content)
     scan_target_path = create_file(str(tmp_path / scan_target_name), scan_target_content)
-    s.track_yara_file(yara_rule_path)
-    s.load_rules()
+    scanner.track_yara_file(yara_rule_path)
+    scanner.load_rules()
 
     if expected:
-        assert s.scan(scan_target_path)
-        assert len(s.scan_results) == 1
+        assert scanner.scan(scan_target_path)
+        assert len(scanner.scan_results) == 1
     else:
-        assert not s.scan(scan_target_path)
-        assert len(s.scan_results) == 0
+        assert not scanner.scan(scan_target_path)
+        assert len(scanner.scan_results) == 0
