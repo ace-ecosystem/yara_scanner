@@ -96,11 +96,13 @@ def get_current_repo_commit(repo_dir):
 
 def rules_hash(namespaces):
     """ combine all of the rule file names and modification names and hash. We can then store the compiled rules to disk and reload on a later run if nothing has changed """
-    to_hash = ""
+    m = hashlib.md5()
     for namespace in sorted(namespaces):
         for path in sorted(namespaces[namespace]):
-            to_hash += '%s%s' % (os.path.basename(path),str(os.path.getmtime(path)))
-    return hashlib.md5(to_hash.encode()).hexdigest() 
+            with open(path, 'rb') as fp:
+                m.update(fp.read())
+
+    return m.hexdigest() 
 
 
 class YaraJSONEncoder(json.JSONEncoder):
@@ -606,8 +608,6 @@ class YaraScanner(object):
                 return True
         except:
             log.warning(f'Failed to load compiled rules: {path}')
-            
-            
 
         try:
             log.info("loading {} rules".format(rule_count))
