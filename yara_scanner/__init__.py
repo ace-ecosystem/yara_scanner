@@ -53,6 +53,8 @@ import traceback
 import sys
 
 from operator import itemgetter
+import hashlib
+import tempfile
 from subprocess import PIPE, Popen
 
 import plyara
@@ -92,6 +94,15 @@ def get_current_repo_commit(repo_dir):
 
     return commit[0:40]
 
+def rules_hash(namespaces):
+    """ combine all of the rule file names and modification names and hash. We can then store the compiled rules to disk and reload on a later run if nothing has changed """
+    to_hash = ""
+    for namespace in sorted(namespaces):
+        for path in sorted(namespaces[namespace]):
+            to_hash += '%s%s' % (os.path.basename(path),str(os.path.getmtime(path)))
+    return hashlib.md5(to_hash.encode()).hexdigest() 
+
+
 class YaraJSONEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, bytes):
@@ -123,7 +134,7 @@ class YaraScanner(object):
         # we can pass in a list of "blacklisted" rules
         # this is a list of rule NAMES that are essentially ignored in the scan results (not output)
         self._blacklisted_rules = set()
-
+        
         # we keep track of when the rules change and (optionally) automatically re-load the rules
         self.tracked_files = {} # key = file_path, value = last modification time
         self.tracked_dirs = {} # key = dir_path, value = {} (key = file_path, value = last mtime)
@@ -132,6 +143,10 @@ class YaraScanner(object):
         # both parameters to this function are for backwards compatibility
         if thread_count is not None:
             log.warning("thread_count is no longer used in YaraScanner.__init__")
+
+        # Where to save/load compiled rules from 
+        #TODO is there a config somewhere to read this from instead?
+        self.compiled_rule_dir = os.path.join(tempfile.gettempdir(), 'compiled_rules')
         
         if signature_dir is not None:
             for dir_path in os.listdir(signature_dir):
@@ -581,9 +596,32 @@ class YaraScanner(object):
         for namespace in sources.keys():
             sources[namespace] = '\r\n'.join(sources[namespace])
 
+        # See if there is an already compiled version of the rules on disk
+        _hash = rules_hash(all_files)
+        path = os.path.join(self.compiled_rule_dir, '{}.cyar'.format(_hash))
+        try:
+            if os.path.isfile(path):
+                log.info('Up to date compiled rules already exist at %s. Using those' % (path))
+                self.rules = yara.load(path)
+                return True
+        except:
+            log.warning(f'Failed to load compiled rules: {path}')
+            
+            
+
         try:
             log.info("loading {} rules".format(rule_count))
             self.rules = yara.compile(sources=sources)
+            
+            #Save the compiled rules
+            try:
+                if not os.path.exists(self.compiled_rule_dir):
+                    os.makedirs(self.compiled_rule_dir)
+                self.rules.save(path)
+                os.chmod(path, 0o666)
+            except Exception as e:
+                log.warning(f'Failed to save compiled rules {path}: {e}')
+
             return True
         except Exception as e:
             log.error("unable to compile all yara rules combined: {}".format(str(e)))
@@ -1250,8 +1288,8 @@ def main():
     parser.add_argument('--from-stdin', required=False, default=False, action='store_true', dest='from_stdin',
         help="Read the list of files to scan from stdin.")
 
-    parser.add_argument('--debug', dest='log_debug', default=False, action='store_true',
-        help="Log debug level messages.")
+    parser.add_argument('-v', '--verbose', action='count', default=0, 
+        help='Increase verbosity. Can specify multiple times for more verbose output')
     parser.add_argument('-j', '--dump-json', required=False, default=False, action='store_true', dest='dump_json',
         help="Dump JSON details of matches.  Otherwise just list the rules that hit.")
 
@@ -1297,7 +1335,9 @@ def main():
     if len(args.yara_rules) == 0 and len(args.yara_dirs) == 0 and len(args.yara_repos) == 0 and args.signature_dir is None:
         args.signature_dir = '/opt/signatures'
 
-    logging.basicConfig(level=logging.DEBUG if args.log_debug else logging.INFO)
+    log_levels = {0: logging.ERROR, 1: logging.WARNING, 2: logging.INFO, 3: logging.DEBUG}
+    log_level = min(max(args.verbose, 0), 3) #clamp to 0-3 inclusive
+    logging.basicConfig(level=log_levels[log_level])
 
     # load any blacklisting
     if args.blacklisted_rules_path is not None:
