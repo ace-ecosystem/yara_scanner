@@ -50,6 +50,9 @@ import struct
 import threading
 import time
 import traceback
+import sys
+
+from operator import itemgetter
 import hashlib
 import tempfile
 from subprocess import PIPE, Popen
@@ -131,7 +134,7 @@ class YaraScanner(object):
         # we can pass in a list of "blacklisted" rules
         # this is a list of rule NAMES that are essentially ignored in the scan results (not output)
         self._blacklisted_rules = set()
-
+        
         # we keep track of when the rules change and (optionally) automatically re-load the rules
         self.tracked_files = {} # key = file_path, value = last modification time
         self.tracked_dirs = {} # key = dir_path, value = {} (key = file_path, value = last mtime)
@@ -140,9 +143,6 @@ class YaraScanner(object):
         # both parameters to this function are for backwards compatibility
         if thread_count is not None:
             log.warning("thread_count is no longer used in YaraScanner.__init__")
-
-        # if we are in test mode, we test each yara file as it is loaded for performance issues
-        self.test_mode = test_mode
 
         # Where to save/load compiled rules from 
         #TODO is there a config somewhere to read this from instead?
@@ -334,6 +334,208 @@ class YaraScanner(object):
             
         return reload_rules
 
+    def test_rules(self, test_config):
+        if not test_config.test:
+            return False
+
+        file_count = 0
+
+        # XXX COPY PASTA 
+        # get the list of all the files to compile
+        all_files = {} # key = "namespace", value = [] of file_paths
+        # XXX there's a bug in yara where using an empty string as the namespace causes a segfault
+        all_files['DEFAULT'] = [ _ for _ in self.tracked_files.keys() if self.tracked_files[_] is not None]
+        file_count += len(all_files['DEFAULT'])
+        for dir_path in self.tracked_dirs.keys():
+            all_files[dir_path] = self.tracked_dirs[dir_path]
+            file_count += len(self.tracked_dirs[dir_path])
+
+        for repo_path in self.tracked_repos.keys():
+            all_files[repo_path] = []
+            for file_path in os.listdir(repo_path):
+                file_path = os.path.join(repo_path, file_path)
+                if file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara'):
+                    all_files[repo_path].append(file_path)
+                    file_count += 1
+
+        # if we have no files to compile then we have nothing to do
+        if file_count == 0:
+            sys.stderr.write("ERROR: no yara files specified\n")
+            return False
+
+        # build the buffers we're going to use to test
+        buffers = [] # [(buffer_name, buffer)]
+
+        if test_config.test_data: # random data to scan
+            buffers.append(('random', test_config.test_data))
+        else:
+            buffers.append(('random', os.urandom(1024 * 1024)))
+
+        for x in range(255):
+            buffers.append((f'chr({x})', bytes([x]) * (1024 * 1024)))
+
+        execution_times = [] # of (total_seconds, buffer_type, file_name, rule_name)
+        execution_errors = [] # of (error_message, buffer_type, file_name, rule_name)
+        string_execution_times = []
+        string_errors = []
+
+        for namespace in all_files.keys():
+            for file_path in all_files[namespace]:
+                with open(file_path, 'r') as fp:
+                    yara_source = fp.read()
+
+                parser = plyara.Plyara()
+                parsed_rules = { } # key = rule_name, value = parsed_yara_rule
+                for parsed_rule in parser.parse_string(yara_source):
+                    # if we specified a rule to test then discard the others
+                    if test_config.test_rule and parsed_rule['rule_name'] != test_config.test_rule:
+                        continue
+
+                    parsed_rules[parsed_rule['rule_name']] = parsed_rule
+
+                # no rules for this file?
+                if not parsed_rules:
+                    continue
+
+                for rule_name in parsed_rules.keys():
+                    # some rules depend on other rules, so we deal with that here
+                    dependencies = [] # list of rule_names that this rule needs
+                    rule_context = None
+
+                    while True:
+                        # compile all the rules we've collected so far as one
+                        dep_source = '\n'.join([parser.rebuild_yara_rule(parsed_rules[r]) 
+                                                for r in dependencies])
+                        try:
+                            rule_context = yara.compile(source='{}\n{}'.format(dep_source, 
+                                           parser.rebuild_yara_rule(parsed_rules[rule_name])))
+                            break
+                        except Exception as e:
+                            # some rules depend on other rules
+                            m = re.search(r'undefined identifier "([^"]+)"', str(e))
+                            if m:
+                                dependency = m.group(1)
+                                if dependency in parsed_rules:
+                                    # add this rule to the compilation and try again
+                                    dependencies.insert(0, dependency)
+                                    continue
+                        
+                            sys.stderr.write("rule {} in file {} does not compile by itself: {}\n".format(
+                                        rule_name, file_path, e))
+                            rule_context = None
+                            break
+
+                    if not rule_context:
+                        continue
+
+                    trigger_test_strings = False
+                    for buffer_name, buffer in buffers:
+                        try:
+                            sys.stderr.write(f"testing {file_path}:{rule_name}:{buffer_name}                                      \r")
+                            sys.stderr.flush()
+                            start_time = time.time()
+                            rule_context.match(data=buffer, timeout=5)
+                            end_time = time.time()
+                            total_seconds = end_time - start_time
+                            execution_times.append([buffer_name, file_path, rule_name, total_seconds])
+                            if test_config.test_strings_if and total_seconds > test_config.test_strings_threshold:
+                                trigger_test_strings = True
+                        except Exception as e:
+                            execution_errors.append([buffer_name, file_path, rule_name, str(e)])
+                            if test_config.test_strings_if:
+                                trigger_test_strings = True
+
+                    if test_config.test_strings or trigger_test_strings:
+                        parser = plyara.Plyara()
+                        parsed_rule = None
+                        for _ in parser.parse_string(yara_source):
+                            if _['rule_name'] == rule_name:
+                                parsed_rule = _
+
+                        if not parsed_rule:
+                            sys.stderr.write(f"no rule named {rule_name} in {file_path}\n")
+                            continue
+
+
+                        string_count = 1
+                        for string in parsed_rule['strings']:
+                            if string['type'] == 'regex':
+                                try:
+                                    string_name = string['name']
+                                    string_value = string['value']
+                                    temp_rule = f"""
+                                    rule temp_rule {{
+                                    strings:
+                                    $ = {string_value}
+                                    condition:
+                                    any of them
+                                    }}"""
+
+                                    string_rule_context = yara.compile(source=temp_rule)
+                                    for buffer_name, buffer in buffers:
+                                        try:
+                                            start_time = time.time()
+                                            scan_result = string_rule_context.match(data=buffer, timeout=5)
+                                            end_time = time.time()
+                                            string_execution_times.append([buffer_name, file_path, rule_name, string_name, len(scan_result), end_time - start_time])
+                                        except Exception as e:
+                                            string_errors.append([buffer_name, file_path, rule_name, string_name, str(e)])
+
+                                        sys.stderr.write(f"{string_count} / {len(parsed_rule['strings'])} | {buffer_name} | {string_value}                                                        \r")
+                                        sys.stderr.flush()
+                                    string_count += 1
+                                except Exception as e:
+                                    sys.stderr.write(f"failed to test string {string_name}: {e}\n")
+                                    string_errors.append(['N/A', file_path, rule_name, string_name, str(e)])
+
+        # order by execution time
+        execution_times = sorted(execution_times, key=itemgetter(3), reverse=True)
+        string_execution_times = sorted(string_execution_times, key=itemgetter(5), reverse=True)
+
+        if test_config.performance_csv:
+            with open(test_config.performance_csv, 'w', newline='') as fp:
+                writer = csv.writer(fp)
+                for row in execution_times:
+                    writer.writerow(row)
+        else:
+            print("BEGIN EXECUTION TIME")
+            for row in execution_times:
+                print(row)
+            print("END EXECUTION TIME")
+
+        if test_config.failure_csv:
+            with open(test_config.failure_csv, 'w', newline='') as fp:
+                writer = csv.writer(fp)
+                for row in execution_errors:
+                    writer.writerow(row)
+        else:
+            print("BEGIN EXECUTION ERRORS")
+            for row in execution_errors:
+                print(row)
+            print("END EXECUTION ERRORS")
+
+        if test_config.string_performance_csv:
+            with open(test_config.string_performance_csv, 'w', newline='') as fp:
+                writer = csv.writer(fp)
+                for row in string_execution_times:
+                    writer.writerow(row)
+        else:
+            print("BEGIN STRING EXECUTION TIME")
+            for row in string_execution_times:
+                print(row)
+            print("END STRING EXECUTION TIME")
+
+        if test_config.string_failure_csv:
+            with open(test_config.string_failure_csv, 'w', newline='') as fp:
+                writer = csv.writer(fp)
+                for row in string_errros:
+                    writer.writerow(row)
+        else:
+            print("BEGIN STRING EXECUTION ERRORS")
+            for row in string_errors:
+                print(row)
+            print("END STRING EXECUTION ERRORS")
+
     def load_rules(self):
         """
         Loads and compiles all tracked yara rules. Returns True if the rules were loaded correctly, False otherwise.
@@ -371,11 +573,6 @@ class YaraScanner(object):
             self.rules = None
             return False
 
-        if self.test_mode:
-            execution_times = [] # of (total_seconds, buffer_type, file_name, rule_name)
-            execution_errors = [] # of (error_message, buffer_type, file_name, rule_name)
-            random_buffer = os.urandom(1024 * 1024) # random data to scan
-
         for namespace in all_files.keys():
             for file_path in all_files[namespace]:
                 with open(file_path, 'r') as fp:
@@ -389,86 +586,12 @@ class YaraScanner(object):
                     except Exception as e:
                         log.error("unable to compile {}: {}".format(file_path, str(e)))
                         continue
-
-                    if self.test_mode:
-                        parser = plyara.Plyara()
-                        parsed_rules = { } # key = rule_name, value = parsed_yara_rule
-                        for parsed_rule in parser.parse_string(data):
-                            parsed_rules[parsed_rule['rule_name']] = parsed_rule
-
-                        for rule_name in parsed_rules.keys():
-                            # some rules depend on other rules, so we deal with that here
-                            dependencies = [] # list of rule_names that this rule needs
-                            rule_context = None
-
-                            while True:
-                                # compile all the rules we've collected so far as one
-                                dep_source = '\n'.join([parser.rebuild_yara_rule(parsed_rules[r]) 
-                                                        for r in dependencies])
-                                try:
-                                    rule_context = yara.compile(source='{}\n{}'.format(dep_source, 
-                                                   parser.rebuild_yara_rule(parsed_rules[rule_name])))
-                                    break
-                                except Exception as e:
-                                    # some rules depend on other rules
-                                    m = re.search(r'undefined identifier "([^"]+)"', str(e))
-                                    if m:
-                                        dependency = m.group(1)
-                                        if dependency in parsed_rules:
-                                            # add this rule to the compilation and try again
-                                            dependencies.insert(0, dependency)
-                                            continue
-                                
-                                    log.warning("rule {} in file {} does not compile by itself: {}".format(
-                                                rule_name, file_path, e))
-                                    rule_context = None
-                                    break
-
-                            if not rule_context:
-                                continue
-
-                            if dependencies:
-                                log.info("testing {}:{},{}".format(file_path, rule_name, ','.join(dependencies)))
-                            else:
-                                log.info("testing {}:{}".format(file_path, rule_name))
-                            
-                            start_time = time.time()
-                            try:
-                                rule_context.match(data=random_buffer, timeout=5)
-                                end_time = time.time()
-                                total_seconds = end_time - start_time
-                                execution_times.append((total_seconds, 'random', file_path, rule_name))
-                            except Exception as e:
-                                execution_errors.append((str(e), 'random', file_name))
-
-                            for x in range(255):
-                                byte_buffer = bytes([x]) * (1024 * 1024)
-                                start_time = time.time()
-                                try:
-                                    rule_context.match(data=byte_buffer, timeout=5)
-                                    end_time = time.time()
-                                    total_seconds = end_time - start_time
-                                    execution_times.append((total_seconds, 'byte({})'.format(x), file_path, rule_name))
-                                except Exception as e:
-                                    execution_errors.append((str(e), 'byte({})'.format(x), file_path, rule_name))
-                                    # if we fail once we break out
-                                    break
                         
                     # then we just store the source to be loaded all at once in the compilation that gets used
                     if namespace not in sources:
                         sources[namespace] = []
 
                     sources[namespace].append(data)
-
-        if self.test_mode:
-            execution_times = sorted(execution_times, key=lambda x: x[0])
-            for execution_time, buffer_type, file_path, yara_rule in execution_times:
-                print("{}:{} <{}> {}".format(file_path, yara_rule, buffer_type, execution_time))
-
-            for error_message, buffer_type, file_path, yara_rule in execution_errors:
-                print("{}:{} <{}> {}".format(file_path, yara_rule, buffer_type, error_message))
-
-            return False
 
         for namespace in sources.keys():
             sources[namespace] = '\r\n'.join(sources[namespace])
@@ -1137,6 +1260,19 @@ def send_block0(s):
     """Writes an empty data block to the given socket."""
     send_data_block(s, b'')
 
+
+class TestConfig:
+    test = False
+    test_rule = None
+    test_strings = False
+    test_strings_if = False
+    test_strings_threshold = 0.1
+    test_data = None
+    performance_csv = None
+    failure_csv = None
+    string_performance_csv = None
+    string_failure_csv = None
+
 def main():
     import argparse
     import pprint
@@ -1159,6 +1295,24 @@ def main():
 
     parser.add_argument('-t', '--test', required=False, default=False, action='store_true', dest='test',
         help="Test each yara file separately against different types of buffers for performance issues.")
+    parser.add_argument('--test-rule', required=False, default=None, dest='test_rule',
+        help="Tests a specific rule.")
+    parser.add_argument('--test-strings', required=False, default=False, action='store_true', dest='test_strings',
+        help="Tests the performance all the strings individually in the selected yara rules.")
+    parser.add_argument('--test-strings-if', required=False, default=False, action='store_true', dest='test_strings_if',
+        help="Tests the performance all the strings individually in rules that take longer than N seconds to complete or rules that fail for any reason.")
+    parser.add_argument('--test-strings-threshold', required=False, default=0.1, type=float, dest='test_strings_threshold',
+        help="The threshold (in seconds) for the --test-strings-if option.")
+    parser.add_argument('--test-data', required=False, default=None, dest='test_data',
+        help="Use the given file as the buffer of random data for the test data.")
+    parser.add_argument('--performance-csv', required=False, default=None, dest='performance_csv',
+        help="Write the performance results of string testing to the given csv formatted file. Defaults to stdout.")
+    parser.add_argument('--failure-csv', required=False, default=None, dest='failure_csv',
+        help="Write the failure results of string testing to the given csv formatted file. Defaults to stdout.")
+    parser.add_argument('--string-performance-csv', required=False, default=None, dest='string_performance_csv',
+        help="Write the performance results of string testing to the given csv formatted file. Defaults to stdout.")
+    parser.add_argument('--string-failure-csv', required=False, default=None, dest='string_failure_csv',
+        help="Write the failure results of string testing to the given csv formatted file. Defaults to stdout.")
 
     parser.add_argument('-y', '--yara-rules', required=False, default=[], action='append', dest='yara_rules',
         help="One yara rule to load.  You can specify more than one of these.")
@@ -1190,7 +1344,7 @@ def main():
         with open(args.blacklisted_rules_path, 'r') as fp:
             args.blacklisted_rules.extend([x.strip() for x in fp.read().split('\n')])
 
-    scanner = YaraScanner(signature_dir=args.signature_dir, test_mode=args.test)
+    scanner = YaraScanner(signature_dir=args.signature_dir)
     scanner.blacklist = args.blacklisted_rules
     for file_path in args.yara_rules:
         scanner.track_yara_file(file_path)
@@ -1200,6 +1354,23 @@ def main():
 
     for repo_path in args.yara_repos:
         scanner.track_yara_repository(repo_path)
+
+    if args.test:
+        test_config = TestConfig()
+        test_config.test = args.test
+        test_config.test_rule = args.test_rule
+        test_config.test_strings = args.test_strings
+        test_config.test_strings_if = args.test_strings_if
+        test_config.test_strings_threshold = args.test_strings_threshold
+        if args.test_data:
+            with open(args.test_data, 'rb') as fp:
+                test_config.test_data = fp.read()
+        test_config.performance_csv = args.performance_csv
+        test_config.failure_csv = args.failure_csv
+        test_config.string_performance_csv = args.string_performance_csv
+        test_config.string_failure_csv = args.string_failure_csv
+        scanner.test_rules(test_config)
+        sys.exit(0)
 
     scanner.load_rules()
 
