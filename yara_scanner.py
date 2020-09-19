@@ -57,7 +57,7 @@ import hashlib
 import tempfile
 from subprocess import PIPE, Popen
 
-import plyara
+import plyara, plyara.utils
 import yara
 
 # keys to the JSON dicts you get back from YaraScanner.scan_results
@@ -406,11 +406,11 @@ class YaraScanner(object):
 
                     while True:
                         # compile all the rules we've collected so far as one
-                        dep_source = '\n'.join([parser.rebuild_yara_rule(parsed_rules[r]) 
+                        dep_source = '\n'.join([plyara.utils.rebuild_yara_rule(parsed_rules[r]) 
                                                 for r in dependencies])
                         try:
                             rule_context = yara.compile(source='{}\n{}'.format(dep_source, 
-                                           parser.rebuild_yara_rule(parsed_rules[rule_name])))
+                                           plyara.utils.rebuild_yara_rule(parsed_rules[rule_name])))
                             break
                         except Exception as e:
                             # some rules depend on other rules

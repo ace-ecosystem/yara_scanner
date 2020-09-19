@@ -34,7 +34,7 @@ include = [ "ysc.py", "yss.py" ]
 python = "^3.6"
 psutil = "^5.6.7"
 yara-python = "^3.11.0"
-plyara = "^2.0.3"
+plyara = "^2.1.1"
 
 [tool.poetry.dev-dependencies]
 pytest = "^4.6"
