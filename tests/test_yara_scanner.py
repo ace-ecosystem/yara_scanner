@@ -1,5 +1,8 @@
+import logging
 import os.path
 import shutil
+import time
+
 from subprocess import Popen
 
 import pytest
@@ -7,7 +10,7 @@ import pytest
 from yara_scanner import (ALL_RESULT_KEYS, RESULT_KEY_META,
                           RESULT_KEY_NAMESPACE, RESULT_KEY_RULE,
                           RESULT_KEY_STRINGS, RESULT_KEY_TAGS,
-                          RESULT_KEY_TARGET, YaraScanner, __version__)
+                          RESULT_KEY_TARGET, YaraScanner, __version__, RulesNotLoadedError)
 
 def create_file(path, content):
     dir = os.path.dirname(path)
@@ -35,9 +38,7 @@ def repo(shared_datadir):
     Popen(['git', '-C', repo_path, 'commit', '-m', 'initial commit']).wait()
     return repo_path
 
-def test_version():
-    assert __version__ == '1.0.15'
-
+@pytest.mark.integration
 def test_signature_dir_load(scanner):
     # there should be two loaded directories
     assert len(scanner.tracked_dirs) == 2
@@ -48,6 +49,7 @@ def test_signature_dir_load(scanner):
     assert not scanner.check_rules()
     assert scanner.load_rules()
 
+@pytest.mark.integration
 def test_data_scan_matching(scanner):
     # this should match
     assert scanner.scan_data('test_rule_1')
@@ -56,6 +58,7 @@ def test_data_scan_matching(scanner):
     # this should not match
     assert not scanner.scan_data('random data')
 
+@pytest.mark.integration
 def test_data_scan_results(scanner):
     scanner.scan_data('test_rule_1')
     # this should match tests/data/signatures/ruleset_a/rule_1.yar
@@ -74,6 +77,7 @@ def test_data_scan_results(scanner):
     # this should match both rules
     assert len(scanner.scan_results) == 2
 
+@pytest.mark.integration
 def test_file_scan_results(scanner, shared_datadir):
     assert scanner.scan(str(shared_datadir / 'scan_targets' / 'scan_target_1.txt'))
 
@@ -84,12 +88,97 @@ def test_file_scan_results(scanner, shared_datadir):
     assert scanner.scan_results[0][RESULT_KEY_STRINGS] == [(0, '$', b'test_rule_1')]
     assert scanner.scan_results[0][RESULT_KEY_TAGS] == ['tag_1']
 
+@pytest.mark.integration
 def test_yara_rule_blacklisting(scanner):
     assert scanner.scan_data('test_rule_1')
     scanner.blacklist_rule('rule_1')
     scanner.load_rules()
     assert not scanner.scan_data('test_rule_1')
 
+@pytest.mark.integration
+def test_compiled_file_tracking(shared_datadir):
+    target_file = str(shared_datadir / 'signatures' / 'compiled.cyar')
+    scanner = YaraScanner()
+    scanner.track_compiled_yara_file(target_file)
+
+    sample_data = str(shared_datadir / 'scan_targets' / 'scan_target_1.txt')
+    # file does not exist yet
+    with pytest.raises(RulesNotLoadedError):
+        scanner.scan(sample_data)
+
+    # load a yara rule, compile and save compilation
+    source_rule = str(shared_datadir / 'signatures' / 'ruleset_a' / 'rule_1.yar')
+    temp = YaraScanner()
+    temp.track_yara_file(source_rule)
+    temp.load_rules()
+    temp.save_compiled_rules(target_file)
+    assert os.path.exists(target_file)
+
+    # rules now exists so this should match
+    assert scanner.check_rules()
+    assert scanner.scan(sample_data)
+
+    # recompile with a different rule
+    time.sleep(0.01) # XXX depending on the mtime not super precise
+    source_rule = str(shared_datadir / 'signatures' / 'ruleset_b' / 'rule_1.yar')
+    temp = YaraScanner()
+    temp.track_yara_file(source_rule)
+    temp.load_rules()
+    temp.save_compiled_rules(target_file)
+    assert os.path.exists(target_file)
+
+    assert scanner.check_rules()
+    scanner.load_rules()
+
+    # the rule changed so this should NOT match
+    assert not scanner.scan(sample_data)
+
+    # recompile again with the original rule
+    time.sleep(0.01) # XXX depending on the mtime not super precise
+    source_rule = str(shared_datadir / 'signatures' / 'ruleset_a' / 'rule_1.yar')
+    temp = YaraScanner()
+    temp.track_yara_file(source_rule)
+    temp.load_rules()
+    temp.save_compiled_rules(target_file)
+    assert os.path.exists(target_file)
+
+    assert scanner.check_rules()
+    scanner.load_rules()
+    assert scanner.scan(sample_data)
+
+    # delete the compiled rule file
+    os.remove(target_file)
+
+    assert not scanner.check_rules()
+    scanner.load_rules()
+    # should still be ok
+    assert scanner.scan(sample_data)
+
+@pytest.mark.integration
+def test_auto_compile(shared_datadir, tmpdir, caplog):
+    caplog.set_level(logging.DEBUG)
+    compiled_rules_dir = tmpdir.mkdir('compiled_rules')
+    scanner = YaraScanner(
+            signature_dir=str(shared_datadir / 'signatures'), 
+            auto_compile_rules=True, 
+            auto_compiled_rules_dir=compiled_rules_dir)
+
+    scanner.load_rules()
+    # there should be a single .cyar file in tempdir
+    file_list = os.listdir(compiled_rules_dir)
+    assert len(file_list) == 1
+    assert file_list[0].endswith('.cyar')
+
+    scanner = YaraScanner(
+            signature_dir=str(shared_datadir / 'signatures'), 
+            auto_compile_rules=True, 
+            auto_compiled_rules_dir=compiled_rules_dir)
+
+    # make sure the compiled rules were used
+    scanner.load_rules()
+    assert 'up to date compiled rules already exist at' in caplog.text
+
+@pytest.mark.integration
 def test_single_file_tracking(scanner, shared_datadir):
     s = YaraScanner()
     yara_rule_path = str(shared_datadir / 'signatures' / 'ruleset_a' / 'rule_1.yar')
@@ -119,6 +208,7 @@ def test_single_file_tracking(scanner, shared_datadir):
     assert s.check_rules()
     assert s.load_rules()
 
+@pytest.mark.integration
 def test_dir_tracking(shared_datadir):
     s = YaraScanner()
     yara_dir_path = str(shared_datadir / 'signatures' / 'ruleset_a')
@@ -161,6 +251,7 @@ def test_dir_tracking(shared_datadir):
     assert s.load_rules()
     assert len(s.tracked_dirs[yara_dir_path]) == 1
 
+@pytest.mark.integration
 @pytest.mark.skipif(not shutil.which('git'), reason="missing git in PATH")
 def test_repo_tracking(repo):
     s = YaraScanner()
@@ -461,6 +552,7 @@ condition:
 ]
 #endregion
 
+@pytest.mark.integration
 @pytest.mark.parametrize("yara_rule_content, scan_target_name, scan_target_content, expected", meta_rule_tests)
 def test_meta_directives(tmp_path, yara_rule_content, scan_target_name, scan_target_content, expected):
     scanner = YaraScanner()

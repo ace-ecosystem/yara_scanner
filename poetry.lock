@@ -230,6 +230,14 @@ ply = ">=3.11"
 
 [[package]]
 category = "main"
+description = "Easy to use progress bars"
+name = "progress"
+optional = false
+python-versions = "*"
+version = "1.5"
+
+[[package]]
+category = "main"
 description = "Cross-platform lib for process and system monitoring in Python."
 name = "psutil"
 optional = false
@@ -533,7 +541,7 @@ docs = ["sphinx", "jaraco.packaging (>=3.2)", "rst.linker (>=1.9)"]
 testing = ["jaraco.itertools", "func-timeout"]
 
 [metadata]
-content-hash = "1d0be2f2d30de846133924508dea37e72a88ab886d2e7db7ad159eb52c1cdcf5"
+content-hash = "9e3fa4b8f5ae12024d6d99de1de0c034acc8ed0bb2dc4b0b1154884d24d7ea41"
 lock-version = "1.0"
 python-versions = "^3.6"
 
@@ -675,6 +683,9 @@ ply = [
 plyara = [
     {file = "plyara-2.1.1-py3-none-any.whl", hash = "sha256:d6d65380e39c7afb83dd55f885063235622cee168eb45e79d87f002641a95b7c"},
     {file = "plyara-2.1.1.tar.gz", hash = "sha256:9f5fcb4fc6b944a92ec2979dcc54d9cf3a02b166c99bfef9e72d534c7ab91e6d"},
+]
+progress = [
+    {file = "progress-1.5.tar.gz", hash = "sha256:69ecedd1d1bbe71bf6313d88d1e6c4d2957b7f1d4f71312c211257f7dae64372"},
 ]
 psutil = [
     {file = "psutil-5.7.2-cp27-none-win32.whl", hash = "sha256:f2018461733b23f308c298653c8903d32aaad7873d25e1d228765e91ae42c3f2"},

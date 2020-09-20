@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # vim: sw=4:ts=4:et:cc=120
-__version__ = '1.0.15'
+__version__ = '1.1.0'
 __doc__ = """
 Yara Scanner
 ============
@@ -33,8 +33,10 @@ A wrapper around the yara library for Python. ::
 
 """
 
+import csv
 import datetime
 import functools
+import io
 import json
 import logging
 import multiprocessing
@@ -47,18 +49,24 @@ import shutil
 import signal
 import socket
 import struct
+import sys
 import threading
 import time
 import traceback
-import sys
 
 from operator import itemgetter
 import hashlib
 import tempfile
 from subprocess import PIPE, Popen
+from typing import Dict, List
 
 import plyara, plyara.utils
+import progress.bar
 import yara
+
+class RulesNotLoadedError(Exception):
+    """Raised when a call is made to scan before any rules have been loaded."""
+    pass
 
 # keys to the JSON dicts you get back from YaraScanner.scan_results
 RESULT_KEY_TARGET = 'target'
@@ -94,16 +102,21 @@ def get_current_repo_commit(repo_dir):
 
     return commit[0:40]
 
-def rules_hash(namespaces):
-    """ combine all of the rule file names and modification names and hash. We can then store the compiled rules to disk and reload on a later run if nothing has changed """
+def get_rules_md5(namespaces: Dict[str, List[str]]) -> str:
+    """Combine all of the rule files and hash. We can then store the compiled
+    rules to disk and reload on a later run if nothing has changed """
     m = hashlib.md5()
     for namespace in sorted(namespaces):
         for path in sorted(namespaces[namespace]):
             with open(path, 'rb') as fp:
-                m.update(fp.read())
+                while True:
+                    chunk = fp.read(io.DEFAULT_BUFFER_SIZE)
+                    if chunk == b'':
+                        break
+
+                    m.update(chunk)
 
     return m.hexdigest() 
-
 
 class YaraJSONEncoder(json.JSONEncoder):
     def default(self, o):
@@ -115,19 +128,31 @@ class YaraJSONEncoder(json.JSONEncoder):
 class YaraScanner(object):
     """
     The primary object used for scanning files and data with yara rules."""
-    def __init__(self, signature_dir=None, thread_count=None, test_mode=False):
+    def __init__(self, 
+            signature_dir=None, 
+            thread_count=None, 
+            test_mode=False, 
+            auto_compile_rules=False, 
+            auto_compiled_rules_dir=None,
+            default_timeout=5):
         """
         Creates a new YaraScanner object.
 
-        :param signature_dir: A directory that contains one directory per set of yara rules. Each subdirectory will get loaded into its own namespace (named after the path to the directory.) This is for convenience. Also see :func:`YaraScanner.track_yara_file`, :func:`YaraScanner.track_yara_dir`, and :func:`YaraScanner.track_yara_repo`.
+        :param signature_dir: A directory that contains one directory per set
+        of yara rules. Each subdirectory will get loaded into its own namespace
+        (named after the path to the directory.) This is for convenience. Also
+        see :func:`YaraScanner.track_yara_file`,
+        :func:`YaraScanner.track_yara_dir`, and
+        :func:`YaraScanner.track_yara_repo`.
+
+        :param compile_rules: Set to True to save and load compiled rules using
+        the compiled_rules_dir. Defaults to False.
+
+        :para compiled_rules_dir: A path to a directory to read/write compiled rules.
+        If this is left as None then the system temporary directory is used.
 
         :type signature_dir: str or None
-        
-        :param thread_count: Number of threads to use. *This parameter is ignored and no longer used.*
-        
-        :param test_mode: When set to True, each yara rule is tested for performance issued when it is loaded.
-        
-        :type test_mode: bool
+
 
         """
         self.rules = None
@@ -141,16 +166,24 @@ class YaraScanner(object):
         self.tracked_files = {} # key = file_path, value = last modification time
         self.tracked_dirs = {} # key = dir_path, value = {} (key = file_path, value = last mtime)
         self.tracked_repos = {} # key = dir_path, value = current git commit
+        self.tracked_compiled_path = None
+        self.tracked_compiled_lastmtime = None
 
         # both parameters to this function are for backwards compatibility
         if thread_count is not None:
+            # TODO use warnings
             log.warning("thread_count is no longer used in YaraScanner.__init__")
 
-        # Where to save/load compiled rules from 
-        #TODO is there a config somewhere to read this from instead?
-        self.compiled_rule_dir = os.path.join(tempfile.gettempdir(), 'compiled_rules')
+        # we are reading/writing compiled rules?
+        self.auto_compile_rules = auto_compile_rules
+
+        # where to save/load compiled rules from 
+        self.auto_compiled_rules_dir = auto_compiled_rules_dir
+        if not self.auto_compiled_rules_dir:
+            self.auto_compiled_rules_dir = os.path.join(tempfile.gettempdir(), 'compiled_rules')
         
-        if signature_dir is not None:
+        # if a "signature directory" is specific then we automatically start tracking rules
+        if signature_dir is not None and os.path.isdir(signature_dir):
             for dir_path in os.listdir(signature_dir):
                 dir_path = os.path.join(signature_dir, dir_path)
                 if not os.path.isdir(dir_path):
@@ -160,6 +193,9 @@ class YaraScanner(object):
                     self.track_yara_repository(dir_path)
                 else:
                     self.track_yara_dir(dir_path)
+
+        # the default amount of time (in seconds) a yara scan is allowed to take before it fails
+        self.default_timeout = default_timeout
 
     @property
     def scan_results(self):
@@ -222,6 +258,12 @@ class YaraScanner(object):
         """Returns True if git is available on the system, False otherwise."""
         return shutil.which('git')
 
+    def track_compiled_yara_file(self, file_path):
+        """Tracks the given file that contains compiled yara rules."""
+        self.tracked_compiled_path = file_path
+        if os.path.exists(file_path):
+            self.tracked_compiled_lastmtime = os.path.getmtime(file_path)
+
     def track_yara_file(self, file_path):
         """Adds a single yara file.  The file is then monitored for changes to mtime, removal or adding."""
         if not os.path.exists(file_path):
@@ -269,9 +311,28 @@ class YaraScanner(object):
 
     def check_rules(self):
         """
-        Returns True if the rules need to be recompiled, False otherwise. The criteria that determines if the rules are recompiled depends on how they are tracked.
+        Returns True if the rules need to be recompiled or reloaded, False
+        otherwise. The criteria that determines if the rules are recompiled
+        depends on how they are tracked.
         
         :rtype: bool"""
+
+        if self.tracked_compiled_path:
+            # did the file come back?
+            if self.tracked_compiled_lastmtime is None and os.path.exists(self.tracked_compiled_path):
+                log.info(f"detected recreated compiled yara file {self.tracked_compiled_path}")
+                return True
+            # was the file deleted?
+            elif self.tracked_compiled_lastmtime is not None and not os.path.exists(self.tracked_compiled_path):
+                log.info(f"detected deleted compiled yara file {self.tracked_compiled_path}")
+                return False # no reason to reload if we have nothing to load
+            # was the file modified?
+            elif os.path.getmtime(self.tracked_compiled_path) != self.tracked_compiled_lastmtime:
+                log.info(f"detected change in compiled yara file {self.tracked_compiled_path}")
+                return True
+            else:
+                # nothing changed, nothing to compare
+                return False
 
         reload_rules = False # final result to return
 
@@ -336,21 +397,19 @@ class YaraScanner(object):
             
         return reload_rules
 
-    def test_rules(self, test_config):
-        if not test_config.test:
-            return False
+    def get_namespace_dict(self) -> Dict[str, List[str]]:
+        """Returns a dictionary that contains lists of the tracked yara files organized by namespace."""
 
-        file_count = 0
+        # if we're using pre-compiled yara rules then you don't need this
+        if self.tracked_compiled_path:
+            return {}
 
-        # XXX COPY PASTA 
-        # get the list of all the files to compile
         all_files = {} # key = "namespace", value = [] of file_paths
+
         # XXX there's a bug in yara where using an empty string as the namespace causes a segfault
         all_files['DEFAULT'] = [ _ for _ in self.tracked_files.keys() if self.tracked_files[_] is not None]
-        file_count += len(all_files['DEFAULT'])
         for dir_path in self.tracked_dirs.keys():
             all_files[dir_path] = self.tracked_dirs[dir_path]
-            file_count += len(self.tracked_dirs[dir_path])
 
         for repo_path in self.tracked_repos.keys():
             all_files[repo_path] = []
@@ -358,7 +417,18 @@ class YaraScanner(object):
                 file_path = os.path.join(repo_path, file_path)
                 if file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara'):
                     all_files[repo_path].append(file_path)
-                    file_count += 1
+
+        return all_files
+
+    def test_rules(self, test_config):
+        if not test_config.test:
+            return False
+
+        if self.tracked_compiled_path:
+            raise RuntimeError("cannot test compiled rules -- you need the source code to test the performance")
+
+        all_files = self.get_namespace_dict()
+        file_count = sum([len(_) for _ in all_files.values()])
 
         # if we have no files to compile then we have nothing to do
         if file_count == 0:
@@ -381,11 +451,15 @@ class YaraScanner(object):
         string_execution_times = []
         string_errors = []
 
+        # total number of steps to take for this test
+        steps = file_count * 256
+
         for namespace in all_files.keys():
             for file_path in all_files[namespace]:
                 with open(file_path, 'r') as fp:
                     yara_source = fp.read()
 
+                rule_count = 0
                 parser = plyara.Plyara()
                 parsed_rules = { } # key = rule_name, value = parsed_yara_rule
                 for parsed_rule in parser.parse_string(yara_source):
@@ -394,12 +468,35 @@ class YaraScanner(object):
                         continue
 
                     parsed_rules[parsed_rule['rule_name']] = parsed_rule
+                    rule_count += 1
 
                 # no rules for this file?
                 if not parsed_rules:
                     continue
 
+                steps = rule_count * 256
+
+                class FancyBar(progress.bar.Bar):
+                    mesasge = 'processing'
+                    suffix = '%(percent).1f%% - %(eta_hms)s - %(rule)s (%(buffer)s)'
+                    rule = None
+                    buffer = None
+
+                    @property
+                    def eta_hms(self):
+                        seconds = self.eta
+                        seconds = seconds % (24 * 3600) 
+                        hour = seconds // 3600
+                        seconds %= 3600
+                        minutes = seconds // 60
+                        seconds %= 60
+                          
+                        return "%d:%02d:%02d" % (hour, minutes, seconds) 
+
+                bar = FancyBar(max=steps)
+
                 for rule_name in parsed_rules.keys():
+                    bar.rule = rule_name
                     # some rules depend on other rules, so we deal with that here
                     dependencies = [] # list of rule_names that this rule needs
                     rule_context = None
@@ -433,8 +530,10 @@ class YaraScanner(object):
                     trigger_test_strings = False
                     for buffer_name, buffer in buffers:
                         try:
-                            sys.stderr.write(f"testing {file_path}:{rule_name}:{buffer_name}                                      \r")
-                            sys.stderr.flush()
+                            bar.buffer = buffer_name
+                            bar.next()
+                            #sys.stderr.write(f"testing {file_path}:{rule_name}:{buffer_name}                                      \r")
+                            #sys.stderr.flush()
                             start_time = time.time()
                             rule_context.match(data=buffer, timeout=5)
                             end_time = time.time()
@@ -490,12 +589,14 @@ class YaraScanner(object):
                                     sys.stderr.write(f"failed to test string {string_name}: {e}\n")
                                     string_errors.append(['N/A', file_path, rule_name, string_name, str(e)])
 
+                bar.finish()
+
         # order by execution time
         execution_times = sorted(execution_times, key=itemgetter(3), reverse=True)
         string_execution_times = sorted(string_execution_times, key=itemgetter(5), reverse=True)
 
-        if test_config.performance_csv:
-            with open(test_config.performance_csv, 'w', newline='') as fp:
+        if test_config.csv or test_config.performance_csv:
+            with open(test_config.csv or test_config.performance_csv, 'w', newline='') as fp:
                 writer = csv.writer(fp)
                 for row in execution_times:
                     writer.writerow(row)
@@ -505,8 +606,8 @@ class YaraScanner(object):
                 print(row)
             print("END EXECUTION TIME")
 
-        if test_config.failure_csv:
-            with open(test_config.failure_csv, 'w', newline='') as fp:
+        if test_config.csv or test_config.failure_csv:
+            with open(test_config.csv or test_config.failure_csv, 'a' if test_config.csv else 'w', newline='') as fp:
                 writer = csv.writer(fp)
                 for row in execution_errors:
                     writer.writerow(row)
@@ -516,8 +617,8 @@ class YaraScanner(object):
                 print(row)
             print("END EXECUTION ERRORS")
 
-        if test_config.string_performance_csv:
-            with open(test_config.string_performance_csv, 'w', newline='') as fp:
+        if test_config.csv or test_config.string_performance_csv:
+            with open(test_config.csv or test_config.string_performance_csv, 'a' if test_config.csv else 'w', newline='') as fp:
                 writer = csv.writer(fp)
                 for row in string_execution_times:
                     writer.writerow(row)
@@ -527,10 +628,10 @@ class YaraScanner(object):
                 print(row)
             print("END STRING EXECUTION TIME")
 
-        if test_config.string_failure_csv:
-            with open(test_config.string_failure_csv, 'w', newline='') as fp:
+        if test_config.csv or test_config.string_failure_csv:
+            with open(test_config.csv or test_config.string_failure_csv, 'a' if test_config.csv else 'w', newline='') as fp:
                 writer = csv.writer(fp)
-                for row in string_errros:
+                for row in string_errors:
                     writer.writerow(row)
         else:
             print("BEGIN STRING EXECUTION ERRORS")
@@ -539,6 +640,41 @@ class YaraScanner(object):
             print("END STRING EXECUTION ERRORS")
 
     def load_rules(self):
+        if self.auto_compile_rules:
+            rules_hash = get_rules_md5(self.get_namespace_dict())
+            compiled_rules_path = os.path.join(self.auto_compiled_rules_dir, f'{rules_hash}.cyar')
+            if self.load_compiled_rules(compiled_rules_path):
+                return True
+
+        if self.compile_and_load_rules():
+            if self.auto_compile_rules:
+                self.save_compiled_rules(compiled_rules_path)
+            return True
+        else:
+            return False
+
+    def load_compiled_rules(self, path):
+        try:
+            if os.path.isfile(path):
+                log.debug(f'up to date compiled rules already exist at {path}')
+                self.rules = yara.load(path)
+                return True
+        except:
+            log.warning(f'failed to load compiled rules: {path}')
+
+        return False
+
+    def save_compiled_rules(self, path):
+        try:
+            self.rules.save(path)
+            os.chmod(path, 0o666) # XXX ???
+            return True
+        except Exception as e:
+            log.warning(f'failed to save compiled rules {path}: {e}')
+
+        return False
+
+    def compile_and_load_rules(self):
         """
         Loads and compiles all tracked yara rules. Returns True if the rules were loaded correctly, False otherwise.
 
@@ -546,28 +682,26 @@ class YaraScanner(object):
 
         :rtype: bool"""
 
+        if self.tracked_compiled_path:
+            try:
+                self.tracked_compiled_lastmtime = os.path.getmtime(self.tracked_compiled_path)
+                self.rules = yara.load(self.tracked_compiled_path)
+                return True
+            except FileNotFoundError:
+                self.tracked_compiled_lastmtime = None
+                return False
+            except Exception as e:
+                log.error("unable to load {self.tracked_compiled_path}: {e}")
+                return False
+
         # load and compile the rules
         # we load all the rules into memory as a string to be compiled
         sources = {}
         rule_count = 0
         file_count = 0
 
-        # get the list of all the files to compile
-        all_files = {} # key = "namespace", value = [] of file_paths
-        # XXX there's a bug in yara where using an empty string as the namespace causes a segfault
-        all_files['DEFAULT'] = [ _ for _ in self.tracked_files.keys() if self.tracked_files[_] is not None]
-        file_count += len(all_files['DEFAULT'])
-        for dir_path in self.tracked_dirs.keys():
-            all_files[dir_path] = self.tracked_dirs[dir_path]
-            file_count += len(self.tracked_dirs[dir_path])
-
-        for repo_path in self.tracked_repos.keys():
-            all_files[repo_path] = []
-            for file_path in os.listdir(repo_path):
-                file_path = os.path.join(repo_path, file_path)
-                if file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara'):
-                    all_files[repo_path].append(file_path)
-                    file_count += 1
+        all_files = self.get_namespace_dict()
+        file_count = sum([len(_) for _ in all_files.values()])
 
         # if we have no files to compile then we have nothing to do
         if file_count == 0:
@@ -598,42 +732,23 @@ class YaraScanner(object):
         for namespace in sources.keys():
             sources[namespace] = '\r\n'.join(sources[namespace])
 
-        # See if there is an already compiled version of the rules on disk
-        _hash = rules_hash(all_files)
-        path = os.path.join(self.compiled_rule_dir, '{}.cyar'.format(_hash))
-        try:
-            if os.path.isfile(path):
-                log.info('Up to date compiled rules already exist at %s. Using those' % (path))
-                self.rules = yara.load(path)
-                return True
-        except:
-            log.warning(f'Failed to load compiled rules: {path}')
-
         try:
             log.info("loading {} rules".format(rule_count))
             self.rules = yara.compile(sources=sources)
-            
-            #Save the compiled rules
-            try:
-                if not os.path.exists(self.compiled_rule_dir):
-                    os.makedirs(self.compiled_rule_dir)
-                self.rules.save(path)
-                os.chmod(path, 0o666)
-            except Exception as e:
-                log.warning(f'Failed to save compiled rules {path}: {e}')
-
             return True
         except Exception as e:
-            log.error("unable to compile all yara rules combined: {}".format(str(e)))
+            log.error(f"unable to compile all yara rules combined: {e}")
             self.rules = None
-            return False
+
+        return False
 
     # we're keeping things backwards compatible here...
     def scan(self, 
         file_path, 
         yara_stdout_file=None,
         yara_stderr_file=None,
-        external_vars={}):
+        external_vars={},
+        timeout=None):
         """
         Scans the given file with the loaded yara rules. Returns True if at least one yara rule matches, False otherwise.
 
@@ -648,18 +763,25 @@ class YaraScanner(object):
         :rtype: bool
         """
 
-        assert self.rules is not None
+        if not timeout:
+            timeout = self.default_timeout
+
+        if self.rules is None:
+            self.load_rules()
+            if self.rules is None:
+                raise RulesNotLoadedError()
 
         # scan the file
         # external variables come from the profile points added to the file
-        yara_matches = self.rules.match(file_path, externals=external_vars, timeout=5)
-        return self._scan(file_path, None, yara_matches, yara_stdout_file, yara_stderr_file, external_vars)
+        yara_matches = self.rules.match(file_path, externals=external_vars, timeout=timeout)
+        return self.filter_scan_results(file_path, None, yara_matches, yara_stdout_file, yara_stderr_file, external_vars)
 
     def scan_data(self,
         data,
         yara_stdout_file=None,
         yara_stderr_file=None,
-        external_vars={}):
+        external_vars={},
+        timeout=None):
         """
         Scans the given data with the loaded yara rules. ``data`` can be either a str or bytes object. Returns True if at least one yara rule matches, False otherwise.
 
@@ -676,12 +798,15 @@ class YaraScanner(object):
 
         assert self.rules is not None
 
+        if not timeout:
+            timeout = self.default_timeout
+
         # scan the data stream
         # external variables come from the profile points added to the file
-        yara_matches = self.rules.match(data=data, externals=external_vars, timeout=5)
-        return self._scan(None, data, yara_matches, yara_stdout_file, yara_stderr_file, external_vars)
+        yara_matches = self.rules.match(data=data, externals=external_vars, timeout=timeout)
+        return self.filter_scan_results(None, data, yara_matches, yara_stdout_file, yara_stderr_file, external_vars)
 
-    def _scan(self, 
+    def filter_scan_results(self, 
         file_path, 
         data,
         yara_matches,
@@ -837,7 +962,6 @@ class YaraScanner(object):
 # * a pickled exception for yara scanning failures
 # * a pickled result dictionary
 # then the server will close the connection
-
 
 COMMAND_FILE_PATH = b'1'
 COMMAND_DATA_STREAM = b'2'
@@ -1260,7 +1384,6 @@ def send_block0(s):
     """Writes an empty data block to the given socket."""
     send_data_block(s, b'')
 
-
 class TestConfig:
     test = False
     test_rule = None
@@ -1268,6 +1391,7 @@ class TestConfig:
     test_strings_if = False
     test_strings_threshold = 0.1
     test_data = None
+    csv = None
     performance_csv = None
     failure_csv = None
     string_performance_csv = None
@@ -1277,8 +1401,6 @@ def main():
     import argparse
     import pprint
     import sys
-
-    #from yara_scanner import YaraScanner, YaraJSONEncoder
 
     parser = argparse.ArgumentParser(description="Scan the given file with yara using all available rulesets.")
     parser.add_argument('paths', metavar='PATHS', nargs="*",
@@ -1300,11 +1422,14 @@ def main():
     parser.add_argument('--test-strings', required=False, default=False, action='store_true', dest='test_strings',
         help="Tests the performance all the strings individually in the selected yara rules.")
     parser.add_argument('--test-strings-if', required=False, default=False, action='store_true', dest='test_strings_if',
-        help="Tests the performance all the strings individually in rules that take longer than N seconds to complete or rules that fail for any reason.")
+        help="""Tests the performance all the strings individually in rules
+        that take longer than N seconds to complete or rules that fail for any
+        reason.""")
     parser.add_argument('--test-strings-threshold', required=False, default=0.1, type=float, dest='test_strings_threshold',
-        help="The threshold (in seconds) for the --test-strings-if option.")
+        help="The threshold (in seconds) for the --test-strings-if option. Defaults to 0.1 seconds.")
     parser.add_argument('--test-data', required=False, default=None, dest='test_data',
         help="Use the given file as the buffer of random data for the test data.")
+    parser.add_argument('--csv', help="Write performance results to the given CSV file.")
     parser.add_argument('--performance-csv', required=False, default=None, dest='performance_csv',
         help="Write the performance results of string testing to the given csv formatted file. Defaults to stdout.")
     parser.add_argument('--failure-csv', required=False, default=None, dest='failure_csv',
@@ -1320,12 +1445,26 @@ def main():
         help="One directory containing yara rules to load.  You can specify more than one of these.")
     parser.add_argument('-G', '--yara-repos', required=False, default=[], action='append', dest='yara_repos',
         help="One directory that is a git repository that contains yara rules to load. You can specify more than one of these.")
+    parser.add_argument('-z', '--compiled-yara-rules',
+        help="Load compiled yara rules from the specified files. This option cannot be combined with -y, -Y, or -G")
+
     parser.add_argument('-c', '--compile-only', required=False, default=False, action='store_true', dest='compile_only',
         help="Compile the rules and exit.")
+
+    parser.add_argument('-C', '--compile-to',
+        help="Compile the rules into the given file path.")
     parser.add_argument('-b', '--blacklist', required=False, default=[], action='append', dest='blacklisted_rules',
         help="A rule to blacklist (remove from the results.)  You can specify more than one of these options.")
     parser.add_argument('-B', '--blacklist-path', required=False, default=None, dest='blacklisted_rules_path',
         help="Path to a file that contains a list of rules to blacklist, one per line.")
+
+    parser.add_argument('-a', '--auto-compile-rules', default=False, action='store_true',
+        help="""Automatically saved the compiled yara rules to disk.
+        Automatically loads pre-compiled rules based on MD5 hash of rule
+        content.""")
+    parser.add_argument('--auto-compiled-rules-dir', 
+        help="""Specifies the directory to use to store automatically compiled
+        yara rules. Defaults to the system temp dir.""")
 
     parser.add_argument('-d', '--signature-dir', dest='signature_dir', default=None,
         help="DEPRECATED: Use a different signature directory than the default.")
@@ -1344,16 +1483,29 @@ def main():
         with open(args.blacklisted_rules_path, 'r') as fp:
             args.blacklisted_rules.extend([x.strip() for x in fp.read().split('\n')])
 
-    scanner = YaraScanner(signature_dir=args.signature_dir)
+    scanner = YaraScanner(
+            signature_dir=args.signature_dir, 
+            auto_compile_rules=args.auto_compile_rules,
+            auto_compiled_rules_dir=args.auto_compiled_rules_dir)
     scanner.blacklist = args.blacklisted_rules
-    for file_path in args.yara_rules:
-        scanner.track_yara_file(file_path)
 
-    for dir_path in args.yara_dirs:
-        scanner.track_yara_dir(dir_path)
+    if args.compiled_yara_rules:
+        scanner.track_compiled_yara_file(args.compiled_yara_rules)
+    else:
+        for file_path in args.yara_rules:
+            scanner.track_yara_file(file_path)
 
-    for repo_path in args.yara_repos:
-        scanner.track_yara_repository(repo_path)
+        for dir_path in args.yara_dirs:
+            scanner.track_yara_dir(dir_path)
+
+        for repo_path in args.yara_repos:
+            scanner.track_yara_repository(repo_path)
+
+    scanner.load_rules()
+
+    if args.compile_to:
+        scanner.save_compiled_rules(args.compile_to)
+        sys.exit(0)
 
     if args.test:
         test_config = TestConfig()
@@ -1365,6 +1517,7 @@ def main():
         if args.test_data:
             with open(args.test_data, 'rb') as fp:
                 test_config.test_data = fp.read()
+        test_config.csv = args.csv
         test_config.performance_csv = args.performance_csv
         test_config.failure_csv = args.failure_csv
         test_config.string_performance_csv = args.string_performance_csv
@@ -1372,12 +1525,11 @@ def main():
         scanner.test_rules(test_config)
         sys.exit(0)
 
-    scanner.load_rules()
 
     if scanner.check_rules():
         scanner.load_rules()
 
-    if args.compile_only or args.test:
+    if args.compile_only or args.test or args.compile_to:
         sys.exit(0)
 
     exit_result = 0
