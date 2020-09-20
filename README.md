@@ -35,71 +35,100 @@ if scanner.check_rules():
 pip install yara-scanner
 ```
 
-## Command Line Instructions
+## Yara Signature Locations
+
+The default global pattern for loading rules is 
+
+```
+/opt/signatures/*/*.yar
+```
+
+You can use the `-d` option to specified a different default location, or, you can use the `-y`, `-Y`, `-G`, and `-z` options to specify specific locations.
+
+## Command Line Options
 
    ```
-   usage: scan [-h] [-r] [--from-stdin] [--debug] [-j] [-t] [-y YARA_RULES]
-               [-Y YARA_DIRS] [-G YARA_REPOS] [-c] [-b BLACKLISTED_RULES]
-               [-B BLACKLISTED_RULES_PATH] [-d SIGNATURE_DIR]
-               [PATHS [PATHS ...]]
+   usage: scan [-h] [-r] [--from-stdin] [-v] [-j] [-t] [--test-rule TEST_RULE] [--test-strings] [--test-strings-if] [--test-strings-threshold TEST_STRINGS_THRESHOLD] [--test-data TEST_DATA] [--csv CSV]
+            [--performance-csv PERFORMANCE_CSV] [--failure-csv FAILURE_CSV] [--string-performance-csv STRING_PERFORMANCE_CSV] [--string-failure-csv STRING_FAILURE_CSV] [-y YARA_RULES] [-Y YARA_DIRS] [-G YARA_REPOS]
+            [-z COMPILED_YARA_RULES] [-c] [-C COMPILE_TO] [-b BLACKLISTED_RULES] [-B BLACKLISTED_RULES_PATH] [-a] [--auto-compiled-rules-dir AUTO_COMPILED_RULES_DIR] [-d SIGNATURE_DIR]
+            [PATHS [PATHS ...]]
 
-   Scan the given file with yara using all available rulesets.
+Scan the given file with yara using all available rulesets.
 
-   positional arguments:
-     PATHS                 One or more files or directories to scan with yara.
+positional arguments:
+  PATHS                 One or more files or directories to scan with yara.
 
-   optional arguments:
-     -h, --help            show this help message and exit
-     -r, --recursive       Recursively scan directories.
-     --from-stdin          Read the list of files to scan from stdin.
-     --debug               Log debug level messages.
-     -j, --dump-json       Dump JSON details of matches. Otherwise just list the
-                           rules that hit.
-     -t, --test            Test each yara file separately against different types
-                           of buffers for performance issues.
-     -y YARA_RULES, --yara-rules YARA_RULES
-                           One yara rule to load. You can specify more than one
-                           of these.
-     -Y YARA_DIRS, --yara-dirs YARA_DIRS
-                           One directory containing yara rules to load. You can
-                           specify more than one of these.
-     -G YARA_REPOS, --yara-repos YARA_REPOS
-                           One directory that is a git repository that contains
-                           yara rules to load. You can specify more than one of
-                           these.
-     -c, --compile-only    Compile the rules and exit.
-     -b BLACKLISTED_RULES, --blacklist BLACKLISTED_RULES
-                           A rule to blacklist (remove from the results.) You can
-                           specify more than one of these options.
-     -B BLACKLISTED_RULES_PATH, --blacklist-path BLACKLISTED_RULES_PATH
-                           Path to a file that contains a list of rules to
-                           blacklist, one per line.
+optional arguments:
+  -h, --help            show this help message and exit
+  -r, --recursive       Recursively scan directories.
+  --from-stdin          Read the list of files to scan from stdin.
+  -v, --verbose         Increase verbosity. Can specify multiple times for more verbose output
+  -j, --dump-json       Dump JSON details of matches. Otherwise just list the rules that hit.
+  -t, --test            Test each yara file separately against different types of buffers for performance issues.
+  --test-rule TEST_RULE
+                        Tests a specific rule.
+  --test-strings        Tests the performance all the strings individually in the selected yara rules.
+  --test-strings-if     Tests the performance all the strings individually in rules that take longer than N seconds to complete or rules that fail for any reason.
+  --test-strings-threshold TEST_STRINGS_THRESHOLD
+                        The threshold (in seconds) for the --test-strings-if option. Defaults to 0.1 seconds.
+  --test-data TEST_DATA
+                        Use the given file as the buffer of random data for the test data.
+  --csv CSV             Write performance results to the given CSV file.
+  --performance-csv PERFORMANCE_CSV
+                        Write the performance results of string testing to the given csv formatted file. Defaults to stdout.
+  --failure-csv FAILURE_CSV
+                        Write the failure results of string testing to the given csv formatted file. Defaults to stdout.
+  --string-performance-csv STRING_PERFORMANCE_CSV
+                        Write the performance results of string testing to the given csv formatted file. Defaults to stdout.
+  --string-failure-csv STRING_FAILURE_CSV
+                        Write the failure results of string testing to the given csv formatted file. Defaults to stdout.
+  -y YARA_RULES, --yara-rules YARA_RULES
+                        One yara rule to load. You can specify more than one of these.
+  -Y YARA_DIRS, --yara-dirs YARA_DIRS
+                        One directory containing yara rules to load. You can specify more than one of these.
+  -G YARA_REPOS, --yara-repos YARA_REPOS
+                        One directory that is a git repository that contains yara rules to load. You can specify more than one of these.
+  -z COMPILED_YARA_RULES, --compiled-yara-rules COMPILED_YARA_RULES
+                        Load compiled yara rules from the specified files. This option cannot be combined with -y, -Y, or -G
+  -c, --compile-only    Compile the rules and exit.
+  -C COMPILE_TO, --compile-to COMPILE_TO
+                        Compile the rules into the given file path.
+  -b BLACKLISTED_RULES, --blacklist BLACKLISTED_RULES
+                        A rule to blacklist (remove from the results.) You can specify more than one of these options.
+  -B BLACKLISTED_RULES_PATH, --blacklist-path BLACKLISTED_RULES_PATH
+                        Path to a file that contains a list of rules to blacklist, one per line.
+  -a, --auto-compile-rules
+                        Automatically saved the compiled yara rules to disk. Automatically loads pre-compiled rules based on MD5 hash of rule content.
+  --auto-compiled-rules-dir AUTO_COMPILED_RULES_DIR
+                        Specifies the directory to use to store automatically compiled yara rules. Defaults to the system temp dir.
+  -d SIGNATURE_DIR, --signature-dir SIGNATURE_DIR
+                        DEPRECATED: Use a different signature directory than the default.
    ```
 
 ## Command Line Examples
 
-scan a single file
+scan a single file using the default rules
    ```bash
    scan ms0day.ppsx
    ```
 
-scan a single file and generate JSON output
+scan a single file and generate JSON output with default rules
    ```bash
    scan -j ms0day.ppsx
    scan -j ms0day.ppsx | json_pp
    ```  
 
-scan multiple files
+scan multiple files with default rules
    ```bash
    scan file1 file2 file3
    ```
 
-scan all files in a directory and all sub-directories
+scan all files in a directory and all sub-directories with default rules
    ```bash
    scan -r dir
    ```
 
-scan a list of files passed in on standard input
+scan a list of files passed in on standard input with default rules
    ``` bash
    find dridex -type f | scan --from-stdin
    ```
@@ -119,13 +148,13 @@ check the syntax of all the rules in a given directory
    scan -c -Y my_rule_dir
    ```
 
-## Blacklisting
+## Filtering Rule Results
 
-The scan tool also supports "blacklisting" rules. These are specified by using the -b and -B command line options. These allow you to exclude certain rules from the search results rather than making changes to the rules themselves. We use this technique to allow us to use the open source yara repository as-is, rather than trying to maintain a modified branch.
+The scan tool also supports filtering out specific rules **before they are loaded**. These are specified by using the -b and -B command line options. This is useful for tuning open source repositories of yara rules.
 
 ## Rule Output Selection
 
-You can specify when a rule should (or should not) be displayed. This allows you to prevent some rules from matching against certain kinds of files, or for a rule to be matched against only one specific file.
+You can specify when a rule match should (or should not) be reported. This allows you to prevent some rules from matching against certain kinds of files, or for a rule to be matched against only one specific file.
 
 The rules are specified as metadata name and value pairs. (example rule syntax)
 
@@ -150,7 +179,7 @@ full_path  | Matches against the full path of the file, if one was specified.
 mime_type  | Matches against the output of file -b --mime-type.
 ```
 
-The value of the metadata variable is the string to match. By default the library matches as is, but special modifiers can be used to perform sub string matching and regular expressions. **Special modifiers are added to the beginning of the value (or list of values) and apply to all values in the string.**
+The value of the metadata variable is a **comma separated list** of values to match. By default the library matches as is, but special modifiers can be used to perform sub string matching and regular expressions. **Special modifiers are applied to all comma separated values in the string.**
 
 ### Matching Modifiers
 
@@ -256,6 +285,8 @@ scan -t --test-data sample.dat
 ## CSV Output
 
 The output of the test can be saved to CSV files using the following options.
+
+`--csv` saves all performance data to the given file.
 
 `--performance-csv` saves the performance data of entire yara files.
 
