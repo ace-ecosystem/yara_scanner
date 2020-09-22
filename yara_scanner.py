@@ -428,7 +428,9 @@ class YaraScanner(object):
             raise RuntimeError("cannot test compiled rules -- you need the source code to test the performance")
 
         all_files = self.get_namespace_dict()
-        file_count = sum([len(_) for _ in all_files.values()])
+        file_count = 0
+        for namespace, file_list in all_files.items():
+            file_count += len(file_list)
 
         # if we have no files to compile then we have nothing to do
         if file_count == 0:
@@ -451,35 +453,124 @@ class YaraScanner(object):
         string_execution_times = []
         string_errors = []
 
-        # total number of steps to take for this test
-        steps = file_count * 256
+        bar = progress.bar.Bar("decompiling rules", max=file_count)
+        parsed_rules = { } # key = rule_name, value = parsed_yara_rule
+        yara_sources = { } # key = rule_name, value = yara_source_string
+        yara_files = { } # key = rule_name, value = file it came from
+        for namespace, file_list in all_files.items():
+            for file_path in file_list:
+                if test_config.show_progress_bar:
+                    bar.next()
 
-        for namespace in all_files.keys():
-            for file_path in all_files[namespace]:
                 with open(file_path, 'r') as fp:
                     yara_source = fp.read()
 
-                rule_count = 0
                 parser = plyara.Plyara()
-                parsed_rules = { } # key = rule_name, value = parsed_yara_rule
                 for parsed_rule in parser.parse_string(yara_source):
                     # if we specified a rule to test then discard the others
                     if test_config.test_rule and parsed_rule['rule_name'] != test_config.test_rule:
                         continue
 
                     parsed_rules[parsed_rule['rule_name']] = parsed_rule
-                    rule_count += 1
+                    yara_sources[parsed_rule['rule_name']] = yara_source
+                    yara_files[parsed_rule['rule_name']] = file_path
 
-                # no rules for this file?
-                if not parsed_rules:
+        if test_config.show_progress_bar:
+            bar.finish()
+
+        steps = len(parsed_rules) * 256
+
+        class FancyBar(progress.bar.Bar):
+            message = 'testing'
+            suffix = '%(percent).1f%% - %(eta_hms)s - %(rule)s (%(buffer)s)'
+            rule = None
+            buffer = None
+
+            @property
+            def eta_hms(self):
+                seconds = self.eta
+                seconds = seconds % (24 * 3600) 
+                hour = seconds // 3600
+                seconds %= 3600
+                minutes = seconds // 60
+                seconds %= 60
+                  
+                return "%d:%02d:%02d" % (hour, minutes, seconds) 
+
+        bar = FancyBar(max=steps)
+
+        for rule_name in parsed_rules.keys():
+            bar.rule = rule_name
+            # some rules depend on other rules, so we deal with that here
+            dependencies = [] # list of rule_names that this rule needs
+            rule_context = None
+
+            while True:
+                # compile all the rules we've collected so far as one
+                dep_source = '\n'.join([plyara.utils.rebuild_yara_rule(parsed_rules[r]) 
+                                        for r in dependencies])
+                try:
+                    rule_context = yara.compile(source='{}\n{}'.format(dep_source, 
+                                   plyara.utils.rebuild_yara_rule(parsed_rules[rule_name])))
+                    break
+                except Exception as e:
+                    # some rules depend on other rules
+                    m = re.search(r'undefined identifier "([^"]+)"', str(e))
+                    if m:
+                        dependency = m.group(1)
+                        if dependency in parsed_rules:
+                            # add this rule to the compilation and try again
+                            dependencies.insert(0, dependency)
+                            continue
+                
+                    sys.stderr.write("rule {} in file {} does not compile by itself: {}\n".format(
+                                rule_name, yara_files[rule_name], e))
+                    rule_context = None
+                    break
+
+            if not rule_context:
+                continue
+
+            trigger_test_strings = False
+            for buffer_name, buffer in buffers:
+                try:
+                    bar.buffer = buffer_name
+                    if test_config.show_progress_bar:
+                        bar.next()
+                    start_time = time.time()
+                    rule_context.match(data=buffer, timeout=5)
+                    end_time = time.time()
+                    total_seconds = end_time - start_time
+                    execution_times.append([buffer_name, yara_files[rule_name], rule_name, total_seconds])
+                    if test_config.test_strings_if and total_seconds > test_config.test_strings_threshold:
+                        trigger_test_strings = True
+                except Exception as e:
+                    execution_errors.append([buffer_name, yara_files[rule_name], rule_name, str(e)])
+                    if test_config.test_strings_if:
+                        trigger_test_strings = True
+
+            if test_config.test_strings or trigger_test_strings:
+                parser = plyara.Plyara()
+                parsed_rule = None
+
+                for _ in parser.parse_string(yara_sources[rule_name]):
+                    if _['rule_name'] == rule_name:
+                        parsed_rule = _
+
+                if not parsed_rule:
+                    sys.stderr.write(f"no rule named {rule_name} in {yara_files[rule_name]}\n")
                     continue
 
-                steps = rule_count * 256
+                string_count = 1
+                for string in parsed_rule['strings']:
+                    if string['type'] == 'regex':
+                        string_count += 1
 
-                class FancyBar(progress.bar.Bar):
-                    mesasge = 'processing'
-                    suffix = '%(percent).1f%% - %(eta_hms)s - %(rule)s (%(buffer)s)'
+                class FancyStringBar(progress.bar.Bar):
+                    message = 'processing'
+                    suffix = '%(percent).1f%% - %(eta_hms)s - %(rule)s %(string)s (%(buffer)s)'
                     rule = None
+                    string = None
                     buffer = None
 
                     @property
@@ -493,103 +584,45 @@ class YaraScanner(object):
                           
                         return "%d:%02d:%02d" % (hour, minutes, seconds) 
 
-                bar = FancyBar(max=steps)
+                string_bar = FancyStringBar(max=string_count * 256)
+                string_bar.rule = rule_name
 
-                for rule_name in parsed_rules.keys():
-                    bar.rule = rule_name
-                    # some rules depend on other rules, so we deal with that here
-                    dependencies = [] # list of rule_names that this rule needs
-                    rule_context = None
-
-                    while True:
-                        # compile all the rules we've collected so far as one
-                        dep_source = '\n'.join([plyara.utils.rebuild_yara_rule(parsed_rules[r]) 
-                                                for r in dependencies])
+                for string in parsed_rule['strings']:
+                    if string['type'] == 'regex':
+                        string_bar.string = string['value']
                         try:
-                            rule_context = yara.compile(source='{}\n{}'.format(dep_source, 
-                                           plyara.utils.rebuild_yara_rule(parsed_rules[rule_name])))
-                            break
-                        except Exception as e:
-                            # some rules depend on other rules
-                            m = re.search(r'undefined identifier "([^"]+)"', str(e))
-                            if m:
-                                dependency = m.group(1)
-                                if dependency in parsed_rules:
-                                    # add this rule to the compilation and try again
-                                    dependencies.insert(0, dependency)
-                                    continue
-                        
-                            sys.stderr.write("rule {} in file {} does not compile by itself: {}\n".format(
-                                        rule_name, file_path, e))
-                            rule_context = None
-                            break
+                            string_name = string['name']
+                            string_value = string['value']
+                            temp_rule = f"""
+                            rule temp_rule {{
+                            strings:
+                            $ = {string_value}
+                            condition:
+                            any of them
+                            }}"""
 
-                    if not rule_context:
-                        continue
-
-                    trigger_test_strings = False
-                    for buffer_name, buffer in buffers:
-                        try:
-                            bar.buffer = buffer_name
-                            bar.next()
-                            #sys.stderr.write(f"testing {file_path}:{rule_name}:{buffer_name}                                      \r")
-                            #sys.stderr.flush()
-                            start_time = time.time()
-                            rule_context.match(data=buffer, timeout=5)
-                            end_time = time.time()
-                            total_seconds = end_time - start_time
-                            execution_times.append([buffer_name, file_path, rule_name, total_seconds])
-                            if test_config.test_strings_if and total_seconds > test_config.test_strings_threshold:
-                                trigger_test_strings = True
-                        except Exception as e:
-                            execution_errors.append([buffer_name, file_path, rule_name, str(e)])
-                            if test_config.test_strings_if:
-                                trigger_test_strings = True
-
-                    if test_config.test_strings or trigger_test_strings:
-                        parser = plyara.Plyara()
-                        parsed_rule = None
-                        for _ in parser.parse_string(yara_source):
-                            if _['rule_name'] == rule_name:
-                                parsed_rule = _
-
-                        if not parsed_rule:
-                            sys.stderr.write(f"no rule named {rule_name} in {file_path}\n")
-                            continue
-
-
-                        string_count = 1
-                        for string in parsed_rule['strings']:
-                            if string['type'] == 'regex':
+                            string_rule_context = yara.compile(source=temp_rule)
+                            for buffer_name, buffer in buffers:
+                                string_bar.buffer = buffer_name
                                 try:
-                                    string_name = string['name']
-                                    string_value = string['value']
-                                    temp_rule = f"""
-                                    rule temp_rule {{
-                                    strings:
-                                    $ = {string_value}
-                                    condition:
-                                    any of them
-                                    }}"""
-
-                                    string_rule_context = yara.compile(source=temp_rule)
-                                    for buffer_name, buffer in buffers:
-                                        try:
-                                            start_time = time.time()
-                                            scan_result = string_rule_context.match(data=buffer, timeout=5)
-                                            end_time = time.time()
-                                            string_execution_times.append([buffer_name, file_path, rule_name, string_name, len(scan_result), end_time - start_time])
-                                        except Exception as e:
-                                            string_errors.append([buffer_name, file_path, rule_name, string_name, str(e)])
-
-                                        sys.stderr.write(f"{string_count} / {len(parsed_rule['strings'])} | {buffer_name} | {string_value}                                                        \r")
-                                        sys.stderr.flush()
-                                    string_count += 1
+                                    start_time = time.time()
+                                    scan_result = string_rule_context.match(data=buffer, timeout=5)
+                                    end_time = time.time()
+                                    string_execution_times.append([buffer_name, yara_files[rule_name], rule_name, string_name, len(scan_result), end_time - start_time])
                                 except Exception as e:
-                                    sys.stderr.write(f"failed to test string {string_name}: {e}\n")
-                                    string_errors.append(['N/A', file_path, rule_name, string_name, str(e)])
+                                    string_errors.append([buffer_name, yara_files[rule_name], rule_name, string_name, str(e)])
 
-                bar.finish()
+                                if test_config.show_progress_bar:
+                                    string_bar.next()
+                        except Exception as e:
+                            sys.stderr.write(f"failed to test string {string_name}: {e}\n")
+                            string_errors.append(['N/A', yara_files[rule_name], rule_name, string_name, str(e)])
+
+                if test_config.show_progress_bar:
+                    string_bar.finish()
+
+        if test_config.show_progress_bar:
+            bar.finish()
 
         # order by execution time
         execution_times = sorted(execution_times, key=itemgetter(3), reverse=True)
@@ -598,6 +631,7 @@ class YaraScanner(object):
         if test_config.csv or test_config.performance_csv:
             with open(test_config.csv or test_config.performance_csv, 'w', newline='') as fp:
                 writer = csv.writer(fp)
+                writer.writerow(['buffer', 'file', 'rule', 'time'])
                 for row in execution_times:
                     writer.writerow(row)
         else:
@@ -609,6 +643,7 @@ class YaraScanner(object):
         if test_config.csv or test_config.failure_csv:
             with open(test_config.csv or test_config.failure_csv, 'a' if test_config.csv else 'w', newline='') as fp:
                 writer = csv.writer(fp)
+                writer.writerow(['buffer', 'file', 'rule', 'error'])
                 for row in execution_errors:
                     writer.writerow(row)
         else:
@@ -620,6 +655,7 @@ class YaraScanner(object):
         if test_config.csv or test_config.string_performance_csv:
             with open(test_config.csv or test_config.string_performance_csv, 'a' if test_config.csv else 'w', newline='') as fp:
                 writer = csv.writer(fp)
+                writer.writerow(['buffer', 'file', 'rule', 'string', 'hits', 'time'])
                 for row in string_execution_times:
                     writer.writerow(row)
         else:
@@ -631,6 +667,7 @@ class YaraScanner(object):
         if test_config.csv or test_config.string_failure_csv:
             with open(test_config.csv or test_config.string_failure_csv, 'a' if test_config.csv else 'w', newline='') as fp:
                 writer = csv.writer(fp)
+                writer.writerow(['buffer', 'file', 'rule', 'string', 'error'])
                 for row in string_errors:
                     writer.writerow(row)
         else:
@@ -1396,6 +1433,7 @@ class TestConfig:
     failure_csv = None
     string_performance_csv = None
     string_failure_csv = None
+    show_progress_bar = False
 
 def main():
     import argparse
@@ -1438,6 +1476,8 @@ def main():
         help="Write the performance results of string testing to the given csv formatted file. Defaults to stdout.")
     parser.add_argument('--string-failure-csv', required=False, default=None, dest='string_failure_csv',
         help="Write the failure results of string testing to the given csv formatted file. Defaults to stdout.")
+    parser.add_argument('--no-progress-bar', default=False, action='store_true',
+        help="Disable the progress bar shown during testing.")
 
     parser.add_argument('-y', '--yara-rules', required=False, default=[], action='append', dest='yara_rules',
         help="One yara rule to load.  You can specify more than one of these.")
@@ -1522,6 +1562,7 @@ def main():
         test_config.failure_csv = args.failure_csv
         test_config.string_performance_csv = args.string_performance_csv
         test_config.string_failure_csv = args.string_failure_csv
+        test_config.show_progress_bar = not args.no_progress_bar
         scanner.test_rules(test_config)
         sys.exit(0)
 
