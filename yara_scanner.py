@@ -59,6 +59,7 @@ import hashlib
 import tempfile
 from subprocess import PIPE, Popen
 from typing import Dict, List
+from configparser import ConfigParser
 
 import plyara, plyara.utils
 import progress.bar
@@ -86,6 +87,53 @@ ALL_RESULT_KEYS = [
 
 yara.set_config(max_strings_per_rule=30720)
 log = logging.getLogger('yara-scanner')
+
+HOME_PATH = os.path.dirname(os.path.abspath(__file__))
+
+# Default search paths to configs defining yara external variables
+DEFAULT_EXT_CONFIG_PATH = os.path.join(HOME_PATH, 'etc', 'external_vars.ini')
+ENV_EXT_CONFIG_PATH = os.environ['YARA_EXTERNAL_VARS_CONFIG_PATH'] if 'YARA_EXTERNAL_VARS_CONFIG_PATH' in os.environ else ''
+USER_EXT_CONFIG_PATH = os.path.join(os.path.expanduser("~"),'.config', 'yara_scanner_external_vars.ini')
+EXTERNAL_VAR_CONFIG_SEARCH_PATHS = [DEFAULT_EXT_CONFIG_PATH, ENV_EXT_CONFIG_PATH, USER_EXT_CONFIG_PATH]
+
+EXTERNAL_VAR_CONFIG_PATHS = []
+for config_path in EXTERNAL_VAR_CONFIG_SEARCH_PATHS:
+    if os.path.exists(config_path):
+        EXTERNAL_VAR_CONFIG_PATHS.append(config_path)
+
+def load_config(config_paths):
+    """Load config given possible config paths.
+
+    :param list config_paths: List of paths.
+    :rtype: configparser.ConfigParser or None
+    """
+    if not config_paths:
+        return None
+
+    config = ConfigParser()
+    finds = []
+    for cp in config_paths:
+        if os.path.exists(cp):
+            log.debug("Found config file at {}.".format(cp))
+            finds.append(cp)
+
+    if not finds:
+        return None
+
+    config.read(finds)
+    return config
+
+def declare_configured_external_variables(config_paths):
+    """Declare configured yara externals.
+
+    :rtype: dict
+    """
+    config = load_config(config_paths)
+    if config and config.has_section('variables'):
+        return dict(config['variables'])
+    return {}
+
+DEFAULT_YARA_RULE_EXTERNALS = declare_configured_external_variables(EXTERNAL_VAR_CONFIG_PATHS)
 
 def get_current_repo_commit(repo_dir):
     """Utility function to return the current commit hash for a given repo directory.  Returns None on failure."""
@@ -134,7 +182,8 @@ class YaraScanner(object):
             test_mode=False, 
             auto_compile_rules=False, 
             auto_compiled_rules_dir=None,
-            default_timeout=5):
+            default_timeout=5,
+            external_vars=DEFAULT_YARA_RULE_EXTERNALS):
         """
         Creates a new YaraScanner object.
 
@@ -196,6 +245,9 @@ class YaraScanner(object):
 
         # the default amount of time (in seconds) a yara scan is allowed to take before it fails
         self.default_timeout = default_timeout
+
+        # default yara external variable declarations
+        self.external_vars = external_vars
 
     @property
     def scan_results(self):
@@ -754,7 +806,7 @@ class YaraScanner(object):
 
                     try:
                         # compile the file as a whole first, make sure that works
-                        rule_context = yara.compile(source=data)
+                        rule_context = yara.compile(source=data, externals=self.external_vars)
                         rule_count += 1
                     except Exception as e:
                         log.error("unable to compile {}: {}".format(file_path, str(e)))
@@ -771,7 +823,7 @@ class YaraScanner(object):
 
         try:
             log.info("loading {} rules".format(rule_count))
-            self.rules = yara.compile(sources=sources)
+            self.rules = yara.compile(sources=sources, externals=self.external_vars)
             return True
         except Exception as e:
             log.error(f"unable to compile all yara rules combined: {e}")
@@ -799,6 +851,19 @@ class YaraScanner(object):
         :type external_vars: dict
         :rtype: bool
         """
+
+        # Make some popular assumptions
+        if not external_vars:
+            external_vars = self.external_vars
+            if 'filepath' in external_vars and not external_vars['filepath']:
+                external_vars['filepath'] = file_path
+            if 'filename' in external_vars and not external_vars['filename']:
+                external_vars['filename'] = os.path.basename(file_path)
+            if 'extension' in external_vars and not external_vars['extension']:
+                if '.' not in file_path:
+                    external_vars['extension'] = ''
+                else:
+                    external_vars['extension'] = file_path.rsplit('.', maxsplit=1)[1]
 
         if not timeout:
             timeout = self.default_timeout
@@ -834,6 +899,9 @@ class YaraScanner(object):
         """
 
         assert self.rules is not None
+
+        if not external_vars:
+            external_vars = self.external_vars
 
         if not timeout:
             timeout = self.default_timeout
@@ -1509,7 +1577,14 @@ def main():
     parser.add_argument('-d', '--signature-dir', dest='signature_dir', default=None,
         help="DEPRECATED: Use a different signature directory than the default.")
 
+    parser.add_argument('-e', '--external-variable-config-paths', default=EXTERNAL_VAR_CONFIG_PATHS, action='append',
+        help="append path to external variable configurations")
+
     args = parser.parse_args()
+
+    external_vars = DEFAULT_YARA_RULE_EXTERNALS
+    if args.external_variable_config_paths:
+        external_vars = declare_configured_external_variables(args.external_variable_config_paths)
 
     if len(args.yara_rules) == 0 and len(args.yara_dirs) == 0 and len(args.yara_repos) == 0 and args.signature_dir is None:
         args.signature_dir = '/opt/signatures'
@@ -1526,7 +1601,8 @@ def main():
     scanner = YaraScanner(
             signature_dir=args.signature_dir, 
             auto_compile_rules=args.auto_compile_rules,
-            auto_compiled_rules_dir=args.auto_compiled_rules_dir)
+            auto_compiled_rules_dir=args.auto_compiled_rules_dir,
+            external_vars=external_vars)
     scanner.blacklist = args.blacklisted_rules
 
     if args.compiled_yara_rules:
