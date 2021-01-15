@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # vim: sw=4:ts=4:et:cc=120
-__version__ = '1.1.2'
+__version__ = "1.1.2"
 __doc__ = """
 Yara Scanner
 ============
@@ -64,17 +64,20 @@ import plyara, plyara.utils
 import progress.bar
 import yara
 
+
 class RulesNotLoadedError(Exception):
     """Raised when a call is made to scan before any rules have been loaded."""
+
     pass
 
+
 # keys to the JSON dicts you get back from YaraScanner.scan_results
-RESULT_KEY_TARGET = 'target'
-RESULT_KEY_META = 'meta'
-RESULT_KEY_NAMESPACE = 'namespace'
-RESULT_KEY_RULE = 'rule'
-RESULT_KEY_STRINGS = 'strings'
-RESULT_KEY_TAGS = 'tags'
+RESULT_KEY_TARGET = "target"
+RESULT_KEY_META = "meta"
+RESULT_KEY_NAMESPACE = "namespace"
+RESULT_KEY_RULE = "rule"
+RESULT_KEY_STRINGS = "strings"
+RESULT_KEY_TAGS = "tags"
 ALL_RESULT_KEYS = [
     RESULT_KEY_TARGET,
     RESULT_KEY_META,
@@ -84,19 +87,23 @@ ALL_RESULT_KEYS = [
     RESULT_KEY_TAGS,
 ]
 
-DEFAULT_YARA_EXTERNALS = {'filename': "",
-                          'filepath': "",
-                          'extension': "",
-                          'filetype': "",
-                          }
+DEFAULT_YARA_EXTERNALS = {
+    "filename": "",
+    "filepath": "",
+    "extension": "",
+    "filetype": "",
+}
 
 yara.set_config(max_strings_per_rule=30720)
-log = logging.getLogger('yara-scanner')
+log = logging.getLogger("yara-scanner")
+
 
 def get_current_repo_commit(repo_dir):
     """Utility function to return the current commit hash for a given repo directory.  Returns None on failure."""
-    p = Popen(['git', '-C', repo_dir, 'log', '-n', '1', '--format=oneline'], stdout=PIPE, stderr=PIPE, universal_newlines=True)
-    commit, stderr= p.communicate()
+    p = Popen(
+        ["git", "-C", repo_dir, "log", "-n", "1", "--format=oneline"], stdout=PIPE, stderr=PIPE, universal_newlines=True
+    )
+    commit, stderr = p.communicate()
     p.wait()
 
     if len(stderr.strip()) > 0:
@@ -108,39 +115,45 @@ def get_current_repo_commit(repo_dir):
 
     return commit[0:40]
 
+
 def get_rules_md5(namespaces: Dict[str, List[str]]) -> str:
     """Combine all of the rule files and hash. We can then store the compiled
-    rules to disk and reload on a later run if nothing has changed """
+    rules to disk and reload on a later run if nothing has changed"""
     m = hashlib.md5()
     for namespace in sorted(namespaces):
         for path in sorted(namespaces[namespace]):
-            with open(path, 'rb') as fp:
+            with open(path, "rb") as fp:
                 while True:
                     chunk = fp.read(io.DEFAULT_BUFFER_SIZE)
-                    if chunk == b'':
+                    if chunk == b"":
                         break
 
                     m.update(chunk)
 
-    return m.hexdigest() 
+    return m.hexdigest()
+
 
 class YaraJSONEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, bytes):
-            return o.decode('utf-8', errors='backslashreplace')
+            return o.decode("utf-8", errors="backslashreplace")
 
         return json.JSONEncoder.default(self, o)
+
 
 class YaraScanner(object):
     """
     The primary object used for scanning files and data with yara rules."""
-    def __init__(self, 
-            signature_dir=None, 
-            thread_count=None, 
-            test_mode=False, 
-            auto_compile_rules=False, 
-            auto_compiled_rules_dir=None,
-            default_timeout=5):
+
+    def __init__(
+        self,
+        signature_dir=None,
+        thread_count=None,
+        test_mode=False,
+        auto_compile_rules=False,
+        auto_compiled_rules_dir=None,
+        default_timeout=5,
+    ):
         """
         Creates a new YaraScanner object.
 
@@ -167,11 +180,11 @@ class YaraScanner(object):
         # we can pass in a list of "blacklisted" rules
         # this is a list of rule NAMES that are essentially ignored in the scan results (not output)
         self._blacklisted_rules = set()
-        
+
         # we keep track of when the rules change and (optionally) automatically re-load the rules
-        self.tracked_files = {} # key = file_path, value = last modification time
-        self.tracked_dirs = {} # key = dir_path, value = {} (key = file_path, value = last mtime)
-        self.tracked_repos = {} # key = dir_path, value = current git commit
+        self.tracked_files = {}  # key = file_path, value = last modification time
+        self.tracked_dirs = {}  # key = dir_path, value = {} (key = file_path, value = last mtime)
+        self.tracked_repos = {}  # key = dir_path, value = current git commit
         self.tracked_compiled_path = None
         self.tracked_compiled_lastmtime = None
 
@@ -183,11 +196,11 @@ class YaraScanner(object):
         # we are reading/writing compiled rules?
         self.auto_compile_rules = auto_compile_rules
 
-        # where to save/load compiled rules from 
+        # where to save/load compiled rules from
         self.auto_compiled_rules_dir = auto_compiled_rules_dir
         if not self.auto_compiled_rules_dir:
-            self.auto_compiled_rules_dir = os.path.join(tempfile.gettempdir(), 'compiled_rules')
-        
+            self.auto_compiled_rules_dir = os.path.join(tempfile.gettempdir(), "compiled_rules")
+
         # if a "signature directory" is specific then we automatically start tracking rules
         if signature_dir is not None and os.path.isdir(signature_dir):
             for dir_path in os.listdir(signature_dir):
@@ -195,7 +208,7 @@ class YaraScanner(object):
                 if not os.path.isdir(dir_path):
                     continue
 
-                if os.path.exists(os.path.join(dir_path, '.git')):
+                if os.path.exists(os.path.join(dir_path, ".git")):
                     self.track_yara_repository(dir_path)
                 else:
                     self.track_yara_dir(dir_path)
@@ -217,7 +230,7 @@ class YaraScanner(object):
                 'strings': list,
                 'tags': list,
             }
-        
+
         **target** is the target of the scane. In the case of file scans then target will be the path to the file that was scanned. In the case of data (raw binary) scans, this will be an empty string.
 
         **meta** is the dict of meta directives of the matching rule.
@@ -262,7 +275,7 @@ class YaraScanner(object):
     @functools.lru_cache()
     def git_available(self):
         """Returns True if git is available on the system, False otherwise."""
-        return shutil.which('git')
+        return shutil.which("git")
 
     def track_compiled_yara_file(self, file_path):
         """Tracks the given file that contains compiled yara rules."""
@@ -273,7 +286,7 @@ class YaraScanner(object):
     def track_yara_file(self, file_path):
         """Adds a single yara file.  The file is then monitored for changes to mtime, removal or adding."""
         if not os.path.exists(file_path):
-            self.tracked_files[file_path] = None # file did not exist when we started tracking
+            self.tracked_files[file_path] = None  # file did not exist when we started tracking
             # we keep track of the path by keeping the key in the dictionary
             # so that if the file comes back we'll reload it
         else:
@@ -291,7 +304,7 @@ class YaraScanner(object):
 
         for file_path in os.listdir(dir_path):
             file_path = os.path.join(dir_path, file_path)
-            if file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara'):
+            if file_path.lower().endswith(".yar") or file_path.lower().endswith(".yara"):
                 self.tracked_dirs[dir_path][file_path] = os.path.getmtime(file_path)
                 log.debug("tracking file {} @ {}".format(file_path, self.tracked_dirs[dir_path][file_path]))
 
@@ -307,7 +320,7 @@ class YaraScanner(object):
             log.error("{} is not a directory".format(dir_path))
             return False
 
-        if not os.path.exists(os.path.join(dir_path, '.git')):
+        if not os.path.exists(os.path.join(dir_path, ".git")):
             log.error("{} is not a git repository (missing .git)".format(dir_path))
             return False
 
@@ -320,7 +333,7 @@ class YaraScanner(object):
         Returns True if the rules need to be recompiled or reloaded, False
         otherwise. The criteria that determines if the rules are recompiled
         depends on how they are tracked.
-        
+
         :rtype: bool"""
 
         if self.tracked_compiled_path:
@@ -331,7 +344,7 @@ class YaraScanner(object):
             # was the file deleted?
             elif self.tracked_compiled_lastmtime is not None and not os.path.exists(self.tracked_compiled_path):
                 log.info(f"detected deleted compiled yara file {self.tracked_compiled_path}")
-                return False # no reason to reload if we have nothing to load
+                return False  # no reason to reload if we have nothing to load
             # was the file modified?
             elif os.path.getmtime(self.tracked_compiled_path) != self.tracked_compiled_lastmtime:
                 log.info(f"detected change in compiled yara file {self.tracked_compiled_path}")
@@ -340,7 +353,7 @@ class YaraScanner(object):
                 # nothing changed, nothing to compare
                 return False
 
-        reload_rules = False # final result to return
+        reload_rules = False  # final result to return
 
         for file_path in self.tracked_files.keys():
             # did the file come back?
@@ -359,11 +372,11 @@ class YaraScanner(object):
                 reload_rules = True
 
         for dir_path in self.tracked_dirs.keys():
-            reload_dir = False # set to True if we need to reload this directory
-            existing_files = set() # keep track of the ones we see
+            reload_dir = False  # set to True if we need to reload this directory
+            existing_files = set()  # keep track of the ones we see
             for file_path in os.listdir(dir_path):
                 file_path = os.path.join(dir_path, file_path)
-                if not ( file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara') ):
+                if not (file_path.lower().endswith(".yar") or file_path.lower().endswith(".yara")):
                     continue
 
                 existing_files.add(file_path)
@@ -389,8 +402,8 @@ class YaraScanner(object):
 
         for repo_path in self.tracked_repos.keys():
             current_repo_commit = get_current_repo_commit(repo_path)
-            #log.debug("repo {} current commit {} tracked commit {}".format(
-                #repo_path, self.tracked_repos[repo_path], current_repo_commit))
+            # log.debug("repo {} current commit {} tracked commit {}".format(
+            # repo_path, self.tracked_repos[repo_path], current_repo_commit))
 
             if current_repo_commit != self.tracked_repos[repo_path]:
                 log.info("detected change in git repo {}".format(repo_path))
@@ -400,7 +413,7 @@ class YaraScanner(object):
         # if we don't have a yara context yet then we def need to compile the rules
         if self.rules is None:
             return True
-            
+
         return reload_rules
 
     def get_namespace_dict(self) -> Dict[str, List[str]]:
@@ -410,10 +423,10 @@ class YaraScanner(object):
         if self.tracked_compiled_path:
             return {}
 
-        all_files = {} # key = "namespace", value = [] of file_paths
+        all_files = {}  # key = "namespace", value = [] of file_paths
 
         # XXX there's a bug in yara where using an empty string as the namespace causes a segfault
-        all_files['DEFAULT'] = [ _ for _ in self.tracked_files.keys() if self.tracked_files[_] is not None]
+        all_files["DEFAULT"] = [_ for _ in self.tracked_files.keys() if self.tracked_files[_] is not None]
         for dir_path in self.tracked_dirs.keys():
             all_files[dir_path] = self.tracked_dirs[dir_path]
 
@@ -421,7 +434,7 @@ class YaraScanner(object):
             all_files[repo_path] = []
             for file_path in os.listdir(repo_path):
                 file_path = os.path.join(repo_path, file_path)
-                if file_path.lower().endswith('.yar') or file_path.lower().endswith('.yara'):
+                if file_path.lower().endswith(".yar") or file_path.lower().endswith(".yara"):
                     all_files[repo_path].append(file_path)
 
         return all_files
@@ -444,42 +457,42 @@ class YaraScanner(object):
             return False
 
         # build the buffers we're going to use to test
-        buffers = [] # [(buffer_name, buffer)]
+        buffers = []  # [(buffer_name, buffer)]
 
-        if test_config.test_data: # random data to scan
-            buffers.append(('random', test_config.test_data))
+        if test_config.test_data:  # random data to scan
+            buffers.append(("random", test_config.test_data))
         else:
-            buffers.append(('random', os.urandom(1024 * 1024)))
+            buffers.append(("random", os.urandom(1024 * 1024)))
 
         for x in range(255):
-            buffers.append((f'chr({x})', bytes([x]) * (1024 * 1024)))
+            buffers.append((f"chr({x})", bytes([x]) * (1024 * 1024)))
 
-        execution_times = [] # of (total_seconds, buffer_type, file_name, rule_name)
-        execution_errors = [] # of (error_message, buffer_type, file_name, rule_name)
+        execution_times = []  # of (total_seconds, buffer_type, file_name, rule_name)
+        execution_errors = []  # of (error_message, buffer_type, file_name, rule_name)
         string_execution_times = []
         string_errors = []
 
         bar = progress.bar.Bar("decompiling rules", max=file_count)
-        parsed_rules = { } # key = rule_name, value = parsed_yara_rule
-        yara_sources = { } # key = rule_name, value = yara_source_string
-        yara_files = { } # key = rule_name, value = file it came from
+        parsed_rules = {}  # key = rule_name, value = parsed_yara_rule
+        yara_sources = {}  # key = rule_name, value = yara_source_string
+        yara_files = {}  # key = rule_name, value = file it came from
         for namespace, file_list in all_files.items():
             for file_path in file_list:
                 if test_config.show_progress_bar:
                     bar.next()
 
-                with open(file_path, 'r') as fp:
+                with open(file_path, "r") as fp:
                     yara_source = fp.read()
 
                 parser = plyara.Plyara()
                 for parsed_rule in parser.parse_string(yara_source):
                     # if we specified a rule to test then discard the others
-                    if test_config.test_rule and parsed_rule['rule_name'] != test_config.test_rule:
+                    if test_config.test_rule and parsed_rule["rule_name"] != test_config.test_rule:
                         continue
 
-                    parsed_rules[parsed_rule['rule_name']] = parsed_rule
-                    yara_sources[parsed_rule['rule_name']] = yara_source
-                    yara_files[parsed_rule['rule_name']] = file_path
+                    parsed_rules[parsed_rule["rule_name"]] = parsed_rule
+                    yara_sources[parsed_rule["rule_name"]] = yara_source
+                    yara_files[parsed_rule["rule_name"]] = file_path
 
         if test_config.show_progress_bar:
             bar.finish()
@@ -487,37 +500,37 @@ class YaraScanner(object):
         steps = len(parsed_rules) * 256
 
         class FancyBar(progress.bar.Bar):
-            message = 'testing'
-            suffix = '%(percent).1f%% - %(eta_hms)s - %(rule)s (%(buffer)s)'
+            message = "testing"
+            suffix = "%(percent).1f%% - %(eta_hms)s - %(rule)s (%(buffer)s)"
             rule = None
             buffer = None
 
             @property
             def eta_hms(self):
                 seconds = self.eta
-                seconds = seconds % (24 * 3600) 
+                seconds = seconds % (24 * 3600)
                 hour = seconds // 3600
                 seconds %= 3600
                 minutes = seconds // 60
                 seconds %= 60
-                  
-                return "%d:%02d:%02d" % (hour, minutes, seconds) 
+
+                return "%d:%02d:%02d" % (hour, minutes, seconds)
 
         bar = FancyBar(max=steps)
 
         for rule_name in parsed_rules.keys():
             bar.rule = rule_name
             # some rules depend on other rules, so we deal with that here
-            dependencies = [] # list of rule_names that this rule needs
+            dependencies = []  # list of rule_names that this rule needs
             rule_context = None
 
             while True:
                 # compile all the rules we've collected so far as one
-                dep_source = '\n'.join([plyara.utils.rebuild_yara_rule(parsed_rules[r]) 
-                                        for r in dependencies])
+                dep_source = "\n".join([plyara.utils.rebuild_yara_rule(parsed_rules[r]) for r in dependencies])
                 try:
-                    rule_context = yara.compile(source='{}\n{}'.format(dep_source, 
-                                   plyara.utils.rebuild_yara_rule(parsed_rules[rule_name])))
+                    rule_context = yara.compile(
+                        source="{}\n{}".format(dep_source, plyara.utils.rebuild_yara_rule(parsed_rules[rule_name]))
+                    )
                     break
                 except Exception as e:
                     # some rules depend on other rules
@@ -528,9 +541,12 @@ class YaraScanner(object):
                             # add this rule to the compilation and try again
                             dependencies.insert(0, dependency)
                             continue
-                
-                    sys.stderr.write("rule {} in file {} does not compile by itself: {}\n".format(
-                                rule_name, yara_files[rule_name], e))
+
+                    sys.stderr.write(
+                        "rule {} in file {} does not compile by itself: {}\n".format(
+                            rule_name, yara_files[rule_name], e
+                        )
+                    )
                     rule_context = None
                     break
 
@@ -560,7 +576,7 @@ class YaraScanner(object):
                 parsed_rule = None
 
                 for _ in parser.parse_string(yara_sources[rule_name]):
-                    if _['rule_name'] == rule_name:
+                    if _["rule_name"] == rule_name:
                         parsed_rule = _
 
                 if not parsed_rule:
@@ -568,13 +584,13 @@ class YaraScanner(object):
                     continue
 
                 string_count = 1
-                for string in parsed_rule['strings']:
-                    if string['type'] == 'regex':
+                for string in parsed_rule["strings"]:
+                    if string["type"] == "regex":
                         string_count += 1
 
                 class FancyStringBar(progress.bar.Bar):
-                    message = 'processing'
-                    suffix = '%(percent).1f%% - %(eta_hms)s - %(rule)s %(string)s (%(buffer)s)'
+                    message = "processing"
+                    suffix = "%(percent).1f%% - %(eta_hms)s - %(rule)s %(string)s (%(buffer)s)"
                     rule = None
                     string = None
                     buffer = None
@@ -582,23 +598,23 @@ class YaraScanner(object):
                     @property
                     def eta_hms(self):
                         seconds = self.eta
-                        seconds = seconds % (24 * 3600) 
+                        seconds = seconds % (24 * 3600)
                         hour = seconds // 3600
                         seconds %= 3600
                         minutes = seconds // 60
                         seconds %= 60
-                          
-                        return "%d:%02d:%02d" % (hour, minutes, seconds) 
+
+                        return "%d:%02d:%02d" % (hour, minutes, seconds)
 
                 string_bar = FancyStringBar(max=string_count * 256)
                 string_bar.rule = rule_name
 
-                for string in parsed_rule['strings']:
-                    if string['type'] == 'regex':
-                        string_bar.string = string['value']
+                for string in parsed_rule["strings"]:
+                    if string["type"] == "regex":
+                        string_bar.string = string["value"]
                         try:
-                            string_name = string['name']
-                            string_value = string['value']
+                            string_name = string["name"]
+                            string_value = string["value"]
                             temp_rule = f"""
                             rule temp_rule {{
                             strings:
@@ -614,15 +630,26 @@ class YaraScanner(object):
                                     start_time = time.time()
                                     scan_result = string_rule_context.match(data=buffer, timeout=5)
                                     end_time = time.time()
-                                    string_execution_times.append([buffer_name, yara_files[rule_name], rule_name, string_name, len(scan_result), end_time - start_time])
+                                    string_execution_times.append(
+                                        [
+                                            buffer_name,
+                                            yara_files[rule_name],
+                                            rule_name,
+                                            string_name,
+                                            len(scan_result),
+                                            end_time - start_time,
+                                        ]
+                                    )
                                 except Exception as e:
-                                    string_errors.append([buffer_name, yara_files[rule_name], rule_name, string_name, str(e)])
+                                    string_errors.append(
+                                        [buffer_name, yara_files[rule_name], rule_name, string_name, str(e)]
+                                    )
 
                                 if test_config.show_progress_bar:
                                     string_bar.next()
                         except Exception as e:
                             sys.stderr.write(f"failed to test string {string_name}: {e}\n")
-                            string_errors.append(['N/A', yara_files[rule_name], rule_name, string_name, str(e)])
+                            string_errors.append(["N/A", yara_files[rule_name], rule_name, string_name, str(e)])
 
                 if test_config.show_progress_bar:
                     string_bar.finish()
@@ -635,9 +662,9 @@ class YaraScanner(object):
         string_execution_times = sorted(string_execution_times, key=itemgetter(5), reverse=True)
 
         if test_config.csv or test_config.performance_csv:
-            with open(test_config.csv or test_config.performance_csv, 'w', newline='') as fp:
+            with open(test_config.csv or test_config.performance_csv, "w", newline="") as fp:
                 writer = csv.writer(fp)
-                writer.writerow(['buffer', 'file', 'rule', 'time'])
+                writer.writerow(["buffer", "file", "rule", "time"])
                 for row in execution_times:
                     writer.writerow(row)
         else:
@@ -647,9 +674,9 @@ class YaraScanner(object):
             print("END EXECUTION TIME")
 
         if test_config.csv or test_config.failure_csv:
-            with open(test_config.csv or test_config.failure_csv, 'a' if test_config.csv else 'w', newline='') as fp:
+            with open(test_config.csv or test_config.failure_csv, "a" if test_config.csv else "w", newline="") as fp:
                 writer = csv.writer(fp)
-                writer.writerow(['buffer', 'file', 'rule', 'error'])
+                writer.writerow(["buffer", "file", "rule", "error"])
                 for row in execution_errors:
                     writer.writerow(row)
         else:
@@ -659,9 +686,11 @@ class YaraScanner(object):
             print("END EXECUTION ERRORS")
 
         if test_config.csv or test_config.string_performance_csv:
-            with open(test_config.csv or test_config.string_performance_csv, 'a' if test_config.csv else 'w', newline='') as fp:
+            with open(
+                test_config.csv or test_config.string_performance_csv, "a" if test_config.csv else "w", newline=""
+            ) as fp:
                 writer = csv.writer(fp)
-                writer.writerow(['buffer', 'file', 'rule', 'string', 'hits', 'time'])
+                writer.writerow(["buffer", "file", "rule", "string", "hits", "time"])
                 for row in string_execution_times:
                     writer.writerow(row)
         else:
@@ -671,9 +700,11 @@ class YaraScanner(object):
             print("END STRING EXECUTION TIME")
 
         if test_config.csv or test_config.string_failure_csv:
-            with open(test_config.csv or test_config.string_failure_csv, 'a' if test_config.csv else 'w', newline='') as fp:
+            with open(
+                test_config.csv or test_config.string_failure_csv, "a" if test_config.csv else "w", newline=""
+            ) as fp:
                 writer = csv.writer(fp)
-                writer.writerow(['buffer', 'file', 'rule', 'string', 'error'])
+                writer.writerow(["buffer", "file", "rule", "string", "error"])
                 for row in string_errors:
                     writer.writerow(row)
         else:
@@ -685,7 +716,7 @@ class YaraScanner(object):
     def load_rules(self):
         if self.auto_compile_rules:
             rules_hash = get_rules_md5(self.get_namespace_dict())
-            compiled_rules_path = os.path.join(self.auto_compiled_rules_dir, f'{rules_hash}.cyar')
+            compiled_rules_path = os.path.join(self.auto_compiled_rules_dir, f"{rules_hash}.cyar")
             if self.load_compiled_rules(compiled_rules_path):
                 return True
 
@@ -699,21 +730,21 @@ class YaraScanner(object):
     def load_compiled_rules(self, path):
         try:
             if os.path.isfile(path):
-                log.debug(f'up to date compiled rules already exist at {path}')
+                log.debug(f"up to date compiled rules already exist at {path}")
                 self.rules = yara.load(path)
                 return True
         except:
-            log.warning(f'failed to load compiled rules: {path}')
+            log.warning(f"failed to load compiled rules: {path}")
 
         return False
 
     def save_compiled_rules(self, path):
         try:
             self.rules.save(path)
-            os.chmod(path, 0o666) # XXX ???
+            os.chmod(path, 0o666)  # XXX ???
             return True
         except Exception as e:
-            log.warning(f'failed to save compiled rules {path}: {e}')
+            log.warning(f"failed to save compiled rules {path}: {e}")
 
         return False
 
@@ -754,7 +785,7 @@ class YaraScanner(object):
 
         for namespace in all_files.keys():
             for file_path in all_files[namespace]:
-                with open(file_path, 'r') as fp:
+                with open(file_path, "r") as fp:
                     log.debug("loading namespace {} rule file {}".format(namespace, file_path))
                     data = fp.read()
 
@@ -765,7 +796,7 @@ class YaraScanner(object):
                     except Exception as e:
                         log.error("unable to compile {}: {}".format(file_path, str(e)))
                         continue
-                        
+
                     # then we just store the source to be loaded all at once in the compilation that gets used
                     if namespace not in sources:
                         sources[namespace] = []
@@ -773,7 +804,7 @@ class YaraScanner(object):
                     sources[namespace].append(data)
 
         for namespace in sources.keys():
-            sources[namespace] = '\r\n'.join(sources[namespace])
+            sources[namespace] = "\r\n".join(sources[namespace])
 
         try:
             log.info("loading {} rules".format(rule_count))
@@ -786,12 +817,7 @@ class YaraScanner(object):
         return False
 
     # we're keeping things backwards compatible here...
-    def scan(self, 
-        file_path, 
-        yara_stdout_file=None,
-        yara_stderr_file=None,
-        external_vars={},
-        timeout=None):
+    def scan(self, file_path, yara_stdout_file=None, yara_stderr_file=None, external_vars={}, timeout=None):
         """
         Scans the given file with the loaded yara rules. Returns True if at least one yara rule matches, False otherwise.
 
@@ -808,10 +834,11 @@ class YaraScanner(object):
 
         # default external variables
         default_external_vars = {
-            'filename': os.path.basename(file_path),
-            'filepath': file_path,
-            'filetype': "", #get_the_file_type(),
-            'extension': file_path.rsplit('.', maxsplit=1)[1] if '.' in file_path else ''}
+            "filename": os.path.basename(file_path),
+            "filepath": file_path,
+            "filetype": "",  # get_the_file_type(),
+            "extension": file_path.rsplit(".", maxsplit=1)[1] if "." in file_path else "",
+        }
         # update with whatever is passed in
         default_external_vars.update(external_vars)
 
@@ -826,14 +853,11 @@ class YaraScanner(object):
         # scan the file
         # external variables come from the profile points added to the file
         yara_matches = self.rules.match(file_path, externals=default_external_vars, timeout=timeout)
-        return self.filter_scan_results(file_path, None, yara_matches, yara_stdout_file, yara_stderr_file, external_vars)
+        return self.filter_scan_results(
+            file_path, None, yara_matches, yara_stdout_file, yara_stderr_file, external_vars
+        )
 
-    def scan_data(self,
-        data,
-        yara_stdout_file=None,
-        yara_stderr_file=None,
-        external_vars={},
-        timeout=None):
+    def scan_data(self, data, yara_stdout_file=None, yara_stderr_file=None, external_vars={}, timeout=None):
         """
         Scans the given data with the loaded yara rules. ``data`` can be either a str or bytes object. Returns True if at least one yara rule matches, False otherwise.
 
@@ -858,18 +882,14 @@ class YaraScanner(object):
         yara_matches = self.rules.match(data=data, externals=external_vars, timeout=timeout)
         return self.filter_scan_results(None, data, yara_matches, yara_stdout_file, yara_stderr_file, external_vars)
 
-    def filter_scan_results(self, 
-        file_path, 
-        data,
-        yara_matches,
-        yara_stdout_file=None,
-        yara_stderr_file=None,
-        external_vars={}):
+    def filter_scan_results(
+        self, file_path, data, yara_matches, yara_stdout_file=None, yara_stderr_file=None, external_vars={}
+    ):
 
         # if we didn't specify a file_path then we default to an empty string
         # that will be the case when we are scanning a data chunk
         if file_path is None:
-            file_path = ''
+            file_path = ""
 
         # the mime type of the file
         # we'll figure it out if we need to
@@ -879,7 +899,7 @@ class YaraScanner(object):
         self.scan_results = []
 
         for match_result in yara_matches:
-            skip = False # state flag
+            skip = False  # state flag
 
             # is this a rule we've blacklisted?
             if match_result.rule in self.blacklist:
@@ -895,51 +915,51 @@ class YaraScanner(object):
 
                 # you can invert the logic by starting the value with !
                 inverted = False
-                if value.startswith('!'):
+                if value.startswith("!"):
                     value = value[1:]
                     inverted = True
 
                 # you can use regex by starting string with re: (after optional negation)
                 use_regex = False
-                if value.startswith('re:'):
+                if value.startswith("re:"):
                     value = value[3:]
                     use_regex = True
 
                 # or you can use substring matching with sub:
                 use_substring = False
-                if value.startswith('sub:'):
+                if value.startswith("sub:"):
                     value = value[4:]
                     use_substring = True
 
                 # figure out what we're going to compare against
                 compare_target = None
-                if directive.lower() == 'file_ext':
-                    if '.' not in file_path:
-                        compare_target = ''
+                if directive.lower() == "file_ext":
+                    if "." not in file_path:
+                        compare_target = ""
                     else:
-                        compare_target = file_path.rsplit('.', maxsplit=1)[1]
+                        compare_target = file_path.rsplit(".", maxsplit=1)[1]
 
-                elif directive.lower() == 'mime_type':
+                elif directive.lower() == "mime_type":
                     # have we determined the mime type for this file yet?
                     if mime_type is None:
                         if not file_path:
-                            mime_type = ''
+                            mime_type = ""
                         else:
-                            p = Popen(['file', '-b', '--mime-type', file_path], stdout=PIPE)
+                            p = Popen(["file", "-b", "--mime-type", file_path], stdout=PIPE)
                             mime_type = p.stdout.read().decode().strip()
                             log.debug("got mime type {} for {}".format(mime_type, file_path))
 
                     compare_target = mime_type
 
-                elif directive.lower() == 'file_name':
+                elif directive.lower() == "file_name":
                     compare_target = os.path.basename(file_path)
 
-                elif directive.lower() == 'full_path':
+                elif directive.lower() == "full_path":
                     compare_target = file_path
 
                 else:
                     # not a meta tag we're using
-                    #log.debug("not a valid meta directive {}".format(directive))
+                    # log.debug("not a valid meta directive {}".format(directive))
                     continue
 
                 log.debug("compare target is {} for directive {}".format(compare_target, directive))
@@ -953,42 +973,50 @@ class YaraScanner(object):
                     compare_function = lambda user_supplied, target: user_supplied.lower() == target.lower()
 
                 matches = False
-                for search_item in [x.strip() for x in value.lower().split(',')]:
+                for search_item in [x.strip() for x in value.lower().split(",")]:
                     matches = matches or compare_function(search_item, compare_target)
-                    #log.debug("search item {} vs compare target {} matches {}".format(search_item, compare_target, matches))
+                    # log.debug("search item {} vs compare target {} matches {}".format(search_item, compare_target, matches))
 
-                if ( inverted and matches ) or ( not inverted and not matches ):
-                    log.debug("skipping yara rule {} for file {} directive {} list {} negated {} regex {} subsearch {}".format(
-                        match_result.rule, file_path, directive, value, inverted, use_regex, use_substring))
+                if (inverted and matches) or (not inverted and not matches):
+                    log.debug(
+                        "skipping yara rule {} for file {} directive {} list {} negated {} regex {} subsearch {}".format(
+                            match_result.rule, file_path, directive, value, inverted, use_regex, use_substring
+                        )
+                    )
                     skip = True
-                    break # we are skipping so we don't need to check anything else
+                    break  # we are skipping so we don't need to check anything else
 
             if not skip:
                 self.scan_results.append(match_result)
 
         # get rid of the yara object and just return dict
         # also includes a "target" (reference to what was scanned)
-        self.scan_results = [{
-            'target': file_path,
-            'meta': o.meta,
-            'namespace': o.namespace,
-            'rule': o.rule,
-            'strings': o.strings,
-            'tags': o.tags } for o in self.scan_results]
+        self.scan_results = [
+            {
+                "target": file_path,
+                "meta": o.meta,
+                "namespace": o.namespace,
+                "rule": o.rule,
+                "strings": o.strings,
+                "tags": o.tags,
+            }
+            for o in self.scan_results
+        ]
 
         # this is for backwards compatible support
         if yara_stdout_file is not None:
             try:
-                with open(yara_stdout_file, 'w') as fp:
+                with open(yara_stdout_file, "w") as fp:
                     json.dump(self.scan_results, fp, indent=4, sort_keys=True)
             except Exception as e:
                 log.error("unable to write to {}: {}".format(yara_stdout_file, str(e)))
-            
+
         return self.has_matches
 
     @property
     def has_matches(self):
         return len(self.scan_results) != 0
+
 
 # typically you might want to start a process, load the rules, then fork() for each client to scan
 # the idea being the each child process will be reusing the same yara rules loaded in memory
@@ -1007,7 +1035,7 @@ class YaraScanner(object):
 # finally the client sends another unsigned integer in network byte order
 # followed by a JSON hash of all the external variables to define for the scan
 # a size of 0 would indicate an empty JSON file
-# 
+#
 # once received the scanner will scan the data (or the file) and submit a result back to the client
 # the result will be a data block with one of the following values
 # * an empty block meaning no matches
@@ -1015,22 +1043,29 @@ class YaraScanner(object):
 # * a pickled result dictionary
 # then the server will close the connection
 
-COMMAND_FILE_PATH = b'1'
-COMMAND_DATA_STREAM = b'2'
+COMMAND_FILE_PATH = b"1"
+COMMAND_DATA_STREAM = b"2"
 
-DEFAULT_BASE_DIR = '/opt/yara_scanner'
-DEFAULT_SIGNATURE_DIR = '/opt/signatures'
-DEFAULT_SOCKET_DIR = 'socket'
+DEFAULT_BASE_DIR = "/opt/yara_scanner"
+DEFAULT_SIGNATURE_DIR = "/opt/signatures"
+DEFAULT_SOCKET_DIR = "socket"
+
 
 class YaraScannerServer(object):
-    def __init__(self, base_dir=DEFAULT_BASE_DIR, signature_dir=DEFAULT_SIGNATURE_DIR, socket_dir=DEFAULT_SOCKET_DIR, 
-                 update_frequency=60, backlog=50):
+    def __init__(
+        self,
+        base_dir=DEFAULT_BASE_DIR,
+        signature_dir=DEFAULT_SIGNATURE_DIR,
+        socket_dir=DEFAULT_SOCKET_DIR,
+        update_frequency=60,
+        backlog=50,
+    ):
 
         # set to True to gracefully shutdown
         self.shutdown = multiprocessing.Event()
 
         # set to True to gracefully shutdown the current scanner (used for reloading)
-        self.current_scanner_shutdown = None # threading.Event
+        self.current_scanner_shutdown = None  # threading.Event
 
         # primary scanner controller
         self.process_manager = None
@@ -1050,7 +1085,7 @@ class YaraScannerServer(object):
 
         # how often do we check to see if the yara rules changed? (in seconds)
         self.update_frequency = update_frequency
-        
+
         # parameter to the socket.listen() function (how many connections to backlog)
         self.backlog = backlog
 
@@ -1116,7 +1151,9 @@ class YaraScannerServer(object):
         for i, scanner in enumerate(self.servers):
             if scanner is None:
                 logging.info("starting scanner on cpu {}".format(i))
-                self.servers[i] = multiprocessing.Process(target=self.run, name="Yara Scanner Server ({})".format(i), args=(i,))
+                self.servers[i] = multiprocessing.Process(
+                    target=self.run, name="Yara Scanner Server ({})".format(i), args=(i,)
+                )
                 self.servers[i].start()
                 log.info("started scanner on cpu {} with pid {}".format(i, self.servers[i].pid))
 
@@ -1146,7 +1183,7 @@ class YaraScannerServer(object):
             self.server_socket.close()
         except Exception as e:
             log.error("unable to close server socket: {}".format(e))
-        
+
         self.server_socket = None
 
         if os.path.exists(self.socket_path):
@@ -1154,7 +1191,7 @@ class YaraScannerServer(object):
                 os.remove(self.socket_path)
             except Exception as e:
                 logging.error("unable to remove {}: {}".format(self.socket_path, e))
-    
+
     def initialize_scanner(self):
         log.info("initializing scanner")
         new_scanner = YaraScanner(signature_dir=self.signature_dir)
@@ -1180,7 +1217,7 @@ class YaraScannerServer(object):
             self.process_manager = None
 
     def run(self, cpu_index):
-        self.cpu_index = cpu_index # starting at 0
+        self.cpu_index = cpu_index  # starting at 0
 
         def _handler(signum, frame):
             self.current_scanner_shutdown.set()
@@ -1227,7 +1264,7 @@ class YaraScannerServer(object):
                 self.kill_server_socket()
                 # don't spin the cpu on failing to allocate the socket
                 self.shutdown.wait(timeout=1)
-                return 
+                return
 
         # get the next client connection
         try:
@@ -1279,19 +1316,19 @@ class YaraScannerServer(object):
 
         if not matches:
             # a data lenghth of 0 means we didn't match anything
-            send_data_block(client_socket, b'')
+            send_data_block(client_socket, b"")
         else:
             # encode and submit the JSON result of the client
-            #print(self.scanner.scan_results)
+            # print(self.scanner.scan_results)
             send_data_block(client_socket, pickle.dumps(self.scanner.scan_results))
 
     def start_rules_monitor(self):
         """Starts a thread the monitor the yara rules. When it detects the yara rules
-           have changed it creates a new YaraScanner and swaps it in (for self.scanner)."""
+        have changed it creates a new YaraScanner and swaps it in (for self.scanner)."""
 
-        self.rule_monitor_thread = threading.Thread(target=self.rule_monitor_loop, 
-                                                    name='Scanner {} Rules Monitor'.format(self.cpu_index),
-                                                    daemon=False)
+        self.rule_monitor_thread = threading.Thread(
+            target=self.rule_monitor_loop, name="Scanner {} Rules Monitor".format(self.cpu_index), daemon=False
+        )
         self.rule_monitor_thread.start()
 
     def rule_monitor_loop(self):
@@ -1306,8 +1343,8 @@ class YaraScannerServer(object):
                 break
 
             if counter >= self.update_frequency:
-                log.debug('checking for new rules...')
-            
+                log.debug("checking for new rules...")
+
                 # do we need to reload the yara rules?
                 if self.scanner.check_rules():
                     self.current_scanner_shutdown.set()
@@ -1326,6 +1363,7 @@ class YaraScannerServer(object):
         if self.rule_monitor_thread.is_alive():
             log.error("unable to stop rule monitor thread")
 
+
 def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_dir=DEFAULT_SOCKET_DIR):
     # pick a random scanner
     # it doesn't matter which one, as long as the load is evenly distributed
@@ -1334,7 +1372,7 @@ def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_
     while True:
         socket_path = os.path.join(base_dir, socket_dir, str(scanner_index))
 
-        ext_vars_json = b''
+        ext_vars_json = b""
         if ext_vars:
             ext_vars_json = json.dumps(ext_vars).encode()
 
@@ -1347,7 +1385,7 @@ def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_
             send_data_block(client_socket, ext_vars_json)
 
             result = read_data_block(client_socket)
-            if result == b'':
+            if result == b"":
                 return {}
 
             result = pickle.loads(result)
@@ -1373,15 +1411,19 @@ def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_
 
             continue
 
+
 def scan_file(path, base_dir=None, socket_dir=DEFAULT_SOCKET_DIR, ext_vars={}):
     return _scan(COMMAND_FILE_PATH, path, ext_vars=ext_vars, base_dir=base_dir, socket_dir=socket_dir)
-        
-def scan_data(data): # XXX ????
+
+
+def scan_data(data):  # XXX ????
     return _scan(COMMAND_DATA_STREAM, data, ext_vars=ext_vars, base_dir=base_dir, socket_dir=socket_dir)
+
 
 #
 # protocol routines
 #
+
 
 def read_n_bytes(s, n):
     """Reads n bytes from socket s.  Returns the bytearray of the data read."""
@@ -1389,33 +1431,36 @@ def read_n_bytes(s, n):
     _buffer = []
     while bytes_read < n:
         data = s.recv(n - bytes_read)
-        if data == b'':
+        if data == b"":
             break
 
         bytes_read += len(data)
         _buffer.append(data)
 
-    result = b''.join(_buffer)
+    result = b"".join(_buffer)
     if len(result) != n:
         log.warning("expected {} bytes but read {}".format(n, len(result)))
 
-    return b''.join(_buffer)
+    return b"".join(_buffer)
+
 
 def read_data_block_size(s):
     """Reads the size of the next data block from the given socket."""
-    size = struct.unpack('!I', read_n_bytes(s, 4))
+    size = struct.unpack("!I", read_n_bytes(s, 4))
     size = size[0]
     log.debug("read command block size {}".format(size))
     return size
 
+
 def read_data_block(s):
     """Reads the next data block from socket s. Returns the bytearray of the data portion of the block."""
     # read the size of the data block (4 byte network order integer)
-    size = struct.unpack('!I', read_n_bytes(s, 4))
+    size = struct.unpack("!I", read_n_bytes(s, 4))
     size = size[0]
-    #log.debug("read command block size {}".format(size))
+    # log.debug("read command block size {}".format(size))
     # read the data portion of the data block
     return read_n_bytes(s, size)
+
 
 def iterate_data_blocks(s):
     """Reads the next data block until a block0 is read."""
@@ -1423,18 +1468,21 @@ def iterate_data_blocks(s):
         block = read_data_block(s)
         if len(block) == 0:
             raise StopIteration()
-    
+
         yield block
+
 
 def send_data_block(s, data):
     """Writes the given data to the given socket as a data block."""
-    message = b''.join([struct.pack("!I", len(data)), data])
-    #log.debug("sending data block length {} ({})".format(len(message), message[:64]))
+    message = b"".join([struct.pack("!I", len(data)), data])
+    # log.debug("sending data block length {} ({})".format(len(message), message[:64]))
     s.sendall(message)
+
 
 def send_block0(s):
     """Writes an empty data block to the given socket."""
-    send_data_block(s, b'')
+    send_data_block(s, b"")
+
 
 class TestConfig:
     test = False
@@ -1450,98 +1498,234 @@ class TestConfig:
     string_failure_csv = None
     show_progress_bar = False
 
+
 def main():
     import argparse
     import pprint
     import sys
 
     parser = argparse.ArgumentParser(description="Scan the given file with yara using all available rulesets.")
-    parser.add_argument('paths', metavar='PATHS', nargs="*",
-        help="One or more files or directories to scan with yara.")
-    parser.add_argument('-r', '--recursive', required=False, default=False, action='store_true', dest='recursive',
-        help="Recursively scan directories.")
-    parser.add_argument('--from-stdin', required=False, default=False, action='store_true', dest='from_stdin',
-        help="Read the list of files to scan from stdin.")
+    parser.add_argument("paths", metavar="PATHS", nargs="*", help="One or more files or directories to scan with yara.")
+    parser.add_argument(
+        "-r",
+        "--recursive",
+        required=False,
+        default=False,
+        action="store_true",
+        dest="recursive",
+        help="Recursively scan directories.",
+    )
+    parser.add_argument(
+        "--from-stdin",
+        required=False,
+        default=False,
+        action="store_true",
+        dest="from_stdin",
+        help="Read the list of files to scan from stdin.",
+    )
 
-    parser.add_argument('-v', '--verbose', action='count', default=0, 
-        help='Increase verbosity. Can specify multiple times for more verbose output')
-    parser.add_argument('-j', '--dump-json', required=False, default=False, action='store_true', dest='dump_json',
-        help="Dump JSON details of matches.  Otherwise just list the rules that hit.")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase verbosity. Can specify multiple times for more verbose output",
+    )
+    parser.add_argument(
+        "-j",
+        "--dump-json",
+        required=False,
+        default=False,
+        action="store_true",
+        dest="dump_json",
+        help="Dump JSON details of matches.  Otherwise just list the rules that hit.",
+    )
 
-    parser.add_argument('-t', '--test', required=False, default=False, action='store_true', dest='test',
-        help="Test each yara file separately against different types of buffers for performance issues.")
-    parser.add_argument('--test-rule', required=False, default=None, dest='test_rule',
-        help="Tests a specific rule.")
-    parser.add_argument('--test-strings', required=False, default=False, action='store_true', dest='test_strings',
-        help="Tests the performance all the strings individually in the selected yara rules.")
-    parser.add_argument('--test-strings-if', required=False, default=False, action='store_true', dest='test_strings_if',
+    parser.add_argument(
+        "-t",
+        "--test",
+        required=False,
+        default=False,
+        action="store_true",
+        dest="test",
+        help="Test each yara file separately against different types of buffers for performance issues.",
+    )
+    parser.add_argument("--test-rule", required=False, default=None, dest="test_rule", help="Tests a specific rule.")
+    parser.add_argument(
+        "--test-strings",
+        required=False,
+        default=False,
+        action="store_true",
+        dest="test_strings",
+        help="Tests the performance all the strings individually in the selected yara rules.",
+    )
+    parser.add_argument(
+        "--test-strings-if",
+        required=False,
+        default=False,
+        action="store_true",
+        dest="test_strings_if",
         help="""Tests the performance all the strings individually in rules
         that take longer than N seconds to complete or rules that fail for any
-        reason.""")
-    parser.add_argument('--test-strings-threshold', required=False, default=0.1, type=float, dest='test_strings_threshold',
-        help="The threshold (in seconds) for the --test-strings-if option. Defaults to 0.1 seconds.")
-    parser.add_argument('--test-data', required=False, default=None, dest='test_data',
-        help="Use the given file as the buffer of random data for the test data.")
-    parser.add_argument('--csv', help="Write performance results to the given CSV file.")
-    parser.add_argument('--performance-csv', required=False, default=None, dest='performance_csv',
-        help="Write the performance results of string testing to the given csv formatted file. Defaults to stdout.")
-    parser.add_argument('--failure-csv', required=False, default=None, dest='failure_csv',
-        help="Write the failure results of string testing to the given csv formatted file. Defaults to stdout.")
-    parser.add_argument('--string-performance-csv', required=False, default=None, dest='string_performance_csv',
-        help="Write the performance results of string testing to the given csv formatted file. Defaults to stdout.")
-    parser.add_argument('--string-failure-csv', required=False, default=None, dest='string_failure_csv',
-        help="Write the failure results of string testing to the given csv formatted file. Defaults to stdout.")
-    parser.add_argument('--no-progress-bar', default=False, action='store_true',
-        help="Disable the progress bar shown during testing.")
+        reason.""",
+    )
+    parser.add_argument(
+        "--test-strings-threshold",
+        required=False,
+        default=0.1,
+        type=float,
+        dest="test_strings_threshold",
+        help="The threshold (in seconds) for the --test-strings-if option. Defaults to 0.1 seconds.",
+    )
+    parser.add_argument(
+        "--test-data",
+        required=False,
+        default=None,
+        dest="test_data",
+        help="Use the given file as the buffer of random data for the test data.",
+    )
+    parser.add_argument("--csv", help="Write performance results to the given CSV file.")
+    parser.add_argument(
+        "--performance-csv",
+        required=False,
+        default=None,
+        dest="performance_csv",
+        help="Write the performance results of string testing to the given csv formatted file. Defaults to stdout.",
+    )
+    parser.add_argument(
+        "--failure-csv",
+        required=False,
+        default=None,
+        dest="failure_csv",
+        help="Write the failure results of string testing to the given csv formatted file. Defaults to stdout.",
+    )
+    parser.add_argument(
+        "--string-performance-csv",
+        required=False,
+        default=None,
+        dest="string_performance_csv",
+        help="Write the performance results of string testing to the given csv formatted file. Defaults to stdout.",
+    )
+    parser.add_argument(
+        "--string-failure-csv",
+        required=False,
+        default=None,
+        dest="string_failure_csv",
+        help="Write the failure results of string testing to the given csv formatted file. Defaults to stdout.",
+    )
+    parser.add_argument(
+        "--no-progress-bar", default=False, action="store_true", help="Disable the progress bar shown during testing."
+    )
 
-    parser.add_argument('-y', '--yara-rules', required=False, default=[], action='append', dest='yara_rules',
-        help="One yara rule to load.  You can specify more than one of these.")
-    parser.add_argument('-Y', '--yara-dirs', required=False, default=[], action='append', dest='yara_dirs',
-        help="One directory containing yara rules to load.  You can specify more than one of these.")
-    parser.add_argument('-G', '--yara-repos', required=False, default=[], action='append', dest='yara_repos',
-        help="One directory that is a git repository that contains yara rules to load. You can specify more than one of these.")
-    parser.add_argument('-z', '--compiled-yara-rules',
-        help="Load compiled yara rules from the specified files. This option cannot be combined with -y, -Y, or -G")
+    parser.add_argument(
+        "-y",
+        "--yara-rules",
+        required=False,
+        default=[],
+        action="append",
+        dest="yara_rules",
+        help="One yara rule to load.  You can specify more than one of these.",
+    )
+    parser.add_argument(
+        "-Y",
+        "--yara-dirs",
+        required=False,
+        default=[],
+        action="append",
+        dest="yara_dirs",
+        help="One directory containing yara rules to load.  You can specify more than one of these.",
+    )
+    parser.add_argument(
+        "-G",
+        "--yara-repos",
+        required=False,
+        default=[],
+        action="append",
+        dest="yara_repos",
+        help="One directory that is a git repository that contains yara rules to load. You can specify more than one of these.",
+    )
+    parser.add_argument(
+        "-z",
+        "--compiled-yara-rules",
+        help="Load compiled yara rules from the specified files. This option cannot be combined with -y, -Y, or -G",
+    )
 
-    parser.add_argument('-c', '--compile-only', required=False, default=False, action='store_true', dest='compile_only',
-        help="Compile the rules and exit.")
+    parser.add_argument(
+        "-c",
+        "--compile-only",
+        required=False,
+        default=False,
+        action="store_true",
+        dest="compile_only",
+        help="Compile the rules and exit.",
+    )
 
-    parser.add_argument('-C', '--compile-to',
-        help="Compile the rules into the given file path.")
-    parser.add_argument('-b', '--blacklist', required=False, default=[], action='append', dest='blacklisted_rules',
-        help="A rule to blacklist (remove from the results.)  You can specify more than one of these options.")
-    parser.add_argument('-B', '--blacklist-path', required=False, default=None, dest='blacklisted_rules_path',
-        help="Path to a file that contains a list of rules to blacklist, one per line.")
+    parser.add_argument("-C", "--compile-to", help="Compile the rules into the given file path.")
+    parser.add_argument(
+        "-b",
+        "--blacklist",
+        required=False,
+        default=[],
+        action="append",
+        dest="blacklisted_rules",
+        help="A rule to blacklist (remove from the results.)  You can specify more than one of these options.",
+    )
+    parser.add_argument(
+        "-B",
+        "--blacklist-path",
+        required=False,
+        default=None,
+        dest="blacklisted_rules_path",
+        help="Path to a file that contains a list of rules to blacklist, one per line.",
+    )
 
-    parser.add_argument('-a', '--auto-compile-rules', default=False, action='store_true',
+    parser.add_argument(
+        "-a",
+        "--auto-compile-rules",
+        default=False,
+        action="store_true",
         help="""Automatically saved the compiled yara rules to disk.
         Automatically loads pre-compiled rules based on MD5 hash of rule
-        content.""")
-    parser.add_argument('--auto-compiled-rules-dir', 
+        content.""",
+    )
+    parser.add_argument(
+        "--auto-compiled-rules-dir",
         help="""Specifies the directory to use to store automatically compiled
-        yara rules. Defaults to the system temp dir.""")
+        yara rules. Defaults to the system temp dir.""",
+    )
 
-    parser.add_argument('-d', '--signature-dir', dest='signature_dir', default=None,
-        help="DEPRECATED: Use a different signature directory than the default.")
+    parser.add_argument(
+        "-d",
+        "--signature-dir",
+        dest="signature_dir",
+        default=None,
+        help="DEPRECATED: Use a different signature directory than the default.",
+    )
 
     args = parser.parse_args()
 
-    if len(args.yara_rules) == 0 and len(args.yara_dirs) == 0 and len(args.yara_repos) == 0 and args.signature_dir is None:
-        args.signature_dir = '/opt/signatures'
+    if (
+        len(args.yara_rules) == 0
+        and len(args.yara_dirs) == 0
+        and len(args.yara_repos) == 0
+        and args.signature_dir is None
+    ):
+        args.signature_dir = "/opt/signatures"
 
     log_levels = {0: logging.ERROR, 1: logging.WARNING, 2: logging.INFO, 3: logging.DEBUG}
-    log_level = min(max(args.verbose, 0), 3) #clamp to 0-3 inclusive
+    log_level = min(max(args.verbose, 0), 3)  # clamp to 0-3 inclusive
     logging.basicConfig(level=log_levels[log_level])
 
     # load any blacklisting
     if args.blacklisted_rules_path is not None:
-        with open(args.blacklisted_rules_path, 'r') as fp:
-            args.blacklisted_rules.extend([x.strip() for x in fp.read().split('\n')])
+        with open(args.blacklisted_rules_path, "r") as fp:
+            args.blacklisted_rules.extend([x.strip() for x in fp.read().split("\n")])
 
     scanner = YaraScanner(
-            signature_dir=args.signature_dir, 
-            auto_compile_rules=args.auto_compile_rules,
-            auto_compiled_rules_dir=args.auto_compiled_rules_dir)
+        signature_dir=args.signature_dir,
+        auto_compile_rules=args.auto_compile_rules,
+        auto_compiled_rules_dir=args.auto_compiled_rules_dir,
+    )
     scanner.blacklist = args.blacklisted_rules
 
     if args.compiled_yara_rules:
@@ -1570,7 +1754,7 @@ def main():
         test_config.test_strings_if = args.test_strings_if
         test_config.test_strings_threshold = args.test_strings_threshold
         if args.test_data:
-            with open(args.test_data, 'rb') as fp:
+            with open(args.test_data, "rb") as fp:
                 test_config.test_data = fp.read()
         test_config.csv = args.csv
         test_config.performance_csv = args.performance_csv
@@ -1580,7 +1764,6 @@ def main():
         test_config.show_progress_bar = not args.no_progress_bar
         scanner.test_rules(test_config)
         sys.exit(0)
-
 
     if scanner.check_rules():
         scanner.load_rules()
@@ -1599,7 +1782,7 @@ def main():
                 else:
                     print(file_path)
                     for match in scanner.scan_results:
-                        print('\t{}'.format(match['rule']))
+                        print("\t{}".format(match["rule"]))
         except Exception as e:
             log.error("scan failed for {}: {}".format(file_path, e))
             exit_result = 1
@@ -1626,5 +1809,6 @@ def main():
 
     sys.exit(exit_result)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
