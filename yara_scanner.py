@@ -84,6 +84,12 @@ ALL_RESULT_KEYS = [
     RESULT_KEY_TAGS,
 ]
 
+DEFAULT_YARA_EXTERNALS = {'filename': "",
+                          'filepath': "",
+                          'extension': "",
+                          'filetype': "",
+                          }
+
 yara.set_config(max_strings_per_rule=30720)
 log = logging.getLogger('yara-scanner')
 
@@ -711,7 +717,7 @@ class YaraScanner(object):
 
         return False
 
-    def compile_and_load_rules(self):
+    def compile_and_load_rules(self, external_vars=DEFAULT_YARA_EXTERNALS):
         """
         Loads and compiles all tracked yara rules. Returns True if the rules were loaded correctly, False otherwise.
 
@@ -754,7 +760,7 @@ class YaraScanner(object):
 
                     try:
                         # compile the file as a whole first, make sure that works
-                        rule_context = yara.compile(source=data)
+                        rule_context = yara.compile(source=data, externals=external_vars)
                         rule_count += 1
                     except Exception as e:
                         log.error("unable to compile {}: {}".format(file_path, str(e)))
@@ -771,7 +777,7 @@ class YaraScanner(object):
 
         try:
             log.info("loading {} rules".format(rule_count))
-            self.rules = yara.compile(sources=sources)
+            self.rules = yara.compile(sources=sources, externals=external_vars)
             return True
         except Exception as e:
             log.error(f"unable to compile all yara rules combined: {e}")
@@ -800,6 +806,15 @@ class YaraScanner(object):
         :rtype: bool
         """
 
+        # default external variables
+        default_external_vars = {
+            'filename': os.path.basename(file_path),
+            'filepath': file_path,
+            'filetype': "", #get_the_file_type(),
+            'extension': file_path.rsplit('.', maxsplit=1)[1] if '.' in file_path else ''}
+        # update with whatever is passed in
+        default_external_vars.update(external_vars)
+
         if not timeout:
             timeout = self.default_timeout
 
@@ -810,7 +825,7 @@ class YaraScanner(object):
 
         # scan the file
         # external variables come from the profile points added to the file
-        yara_matches = self.rules.match(file_path, externals=external_vars, timeout=timeout)
+        yara_matches = self.rules.match(file_path, externals=default_external_vars, timeout=timeout)
         return self.filter_scan_results(file_path, None, yara_matches, yara_stdout_file, yara_stderr_file, external_vars)
 
     def scan_data(self,
