@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "yara_scanner"
-version = "1.1.3"
+version = "1.1.4"
 description = "A Python wrapper library for libyara and a local server for fully utilizing the CPUs of the system to scan with yara."
 authors = ["John Davison <unixfreak0037@gmail.com>"]
 license = "Apache-2.0"

@@ -713,14 +713,14 @@ class YaraScanner(object):
                 print(row)
             print("END STRING EXECUTION ERRORS")
 
-    def load_rules(self):
+    def load_rules(self, external_vars=DEFAULT_YARA_EXTERNALS):
         if self.auto_compile_rules:
             rules_hash = get_rules_md5(self.get_namespace_dict())
             compiled_rules_path = os.path.join(self.auto_compiled_rules_dir, f"{rules_hash}.cyar")
             if self.load_compiled_rules(compiled_rules_path):
                 return True
 
-        if self.compile_and_load_rules():
+        if self.compile_and_load_rules(external_vars=external_vars):
             if self.auto_compile_rules:
                 self.save_compiled_rules(compiled_rules_path)
             return True
