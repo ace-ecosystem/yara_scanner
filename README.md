@@ -31,8 +31,16 @@ if scanner.check_rules():
 
 ## Installation Instructions
 
+### From PyPi
 ```bash
 pip install yara-scanner
+```
+
+### From Github
+```
+git clone https://github.com/ace-ecosystem/yara_scanner
+cd yara_scanner
+pip install -r requirements.txt
 ```
 
 ## Yara Signature Locations
@@ -326,4 +334,4 @@ Error data has a format that is similar to the performance data but inside of **
 
 ## Error 30
 
-If you see "Error 30" is means your rule, or strings inside of a rule, matched too many times.
+If you see "Error 30" it means your rule, or strings inside of a rule, matched too many times.
