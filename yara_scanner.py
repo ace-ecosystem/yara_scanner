@@ -1277,8 +1277,7 @@ class YaraScannerServer(object):
         try:
             self.process_client(client_socket)
         except Exception as e:
-            log.error("unable to process client request: {}".format(e))
-            traceback.print_exc()
+            log.info("unable to process client request: {}".format(e))
         finally:
             try:
                 client_socket.close()
