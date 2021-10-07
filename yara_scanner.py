@@ -852,7 +852,10 @@ class YaraScanner(object):
 
         # scan the file
         # external variables come from the profile points added to the file
-        yara_matches = self.rules.match(file_path, externals=default_external_vars, timeout=timeout)
+        if timeout == 0:
+            yara_matches = self.rules.match(file_path, externals=default_external_vars)
+        else:
+            yara_matches = self.rules.match(file_path, externals=default_external_vars, timeout=timeout)
         return self.filter_scan_results(
             file_path, None, yara_matches, yara_stdout_file, yara_stderr_file, external_vars
         )
@@ -1059,6 +1062,7 @@ class YaraScannerServer(object):
         socket_dir=DEFAULT_SOCKET_DIR,
         update_frequency=60,
         backlog=50,
+        default_timeout=5,
     ):
 
         # set to True to gracefully shutdown
@@ -1107,6 +1111,9 @@ class YaraScannerServer(object):
 
         # set to True when we receive a SIGUSR1
         self.sigusr1 = False
+        
+        # save default timeout to use for scanner
+        self.default_timeout = default_timeout
 
     #
     # scanning processes die when they need to reload rules
@@ -1194,7 +1201,7 @@ class YaraScannerServer(object):
 
     def initialize_scanner(self):
         log.info("initializing scanner")
-        new_scanner = YaraScanner(signature_dir=self.signature_dir)
+        new_scanner = YaraScanner(signature_dir=self.signature_dir, default_timeout=self.default_timeout)
         new_scanner.load_rules()
         self.scanner = new_scanner
 
