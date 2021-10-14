@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # vim: sw=4:ts=4:et:cc=120
-__version__ = "1.1.3"
+__version__ = "1.1.8"
 __doc__ = """
 Yara Scanner
 ============
@@ -1412,7 +1412,7 @@ def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_
 
             # if we've swung back around wait for a few seconds and try again
             if scanner_index == starting_index:
-                log.error("no scanners available")
+                log.info("no scanners available")
                 raise
 
             continue
