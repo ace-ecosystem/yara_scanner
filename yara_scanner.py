@@ -969,9 +969,9 @@ class YaraScanner(object):
 
                 # figure out how to compare what is supplied by the user to the search target
                 if use_regex:
-                    compare_function = lambda user_supplied, target: re.search(user_supplied, target)
+                    compare_function = lambda user_supplied, target: re.search(user_supplied, target, re.IGNORECASE)
                 elif use_substring:
-                    compare_function = lambda user_supplied, target: user_supplied in target
+                    compare_function = lambda user_supplied, target: user_supplied.lower() in target.lower()
                 else:
                     compare_function = lambda user_supplied, target: user_supplied.lower() == target.lower()
 
