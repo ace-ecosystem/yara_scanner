@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # vim: sw=4:ts=4:et:cc=120
+from __future__ import annotations
+
 __version__ = "1.1.8"
 __doc__ = """
 Yara Scanner
@@ -60,6 +62,7 @@ import tempfile
 from subprocess import PIPE, Popen
 from typing import Dict, List
 
+
 import plyara, plyara.utils
 import progress.bar
 import yara
@@ -93,6 +96,18 @@ DEFAULT_YARA_EXTERNALS = {
     "extension": "",
     "filetype": "",
 }
+
+META_FILTER_FILE_EXT = "file_ext"
+META_FILTER_FILE_NAME = "file_name"
+META_FILTER_FULL_PATH = "full_path"
+META_FILTER_MIME_TYPE = "mime_type"
+
+VALID_META_FILTERS = [
+    META_FILTER_FILE_EXT,
+    META_FILTER_FILE_NAME,
+    META_FILTER_FULL_PATH,
+    META_FILTER_MIME_TYPE,
+]
 
 yara.set_config(max_strings_per_rule=30720)
 log = logging.getLogger("yara-scanner")
@@ -131,6 +146,122 @@ def get_rules_md5(namespaces: Dict[str, List[str]]) -> str:
                     m.update(chunk)
 
     return m.hexdigest()
+
+def extract_filters_from_metadata(meta_dicts: list[dict[str, str]]) -> dict[str, str]:
+    """Extract the meta directives for filtering.
+    meta_dicts is the list of dicts that is the metadata field of what is returned by plyara
+    Returns the dict of filter_name: filter_value"""
+    result = {}
+    for meta_dict in meta_dicts:
+        for key, value in meta_dict.items():
+            if key in VALID_META_FILTERS:
+                result[key] = value
+
+    return result
+
+def create_filter_check(filters: dict[str, str]) -> callable:
+    """Given the directives, return the filter check function."""
+    
+    def filter_check(file_path: str) -> bool:
+        nonlocal filters
+
+        for directive, value in filters.items():
+            # you can invert the logic by starting the value with !
+            inverted = False
+            if value.startswith("!"):
+                value = value[1:]
+                inverted = True
+
+            # you can use regex by starting string with re: (after optional negation)
+            use_regex = False
+            if value.startswith("re:"):
+                value = value[3:]
+                use_regex = True
+
+            # or you can use substring matching with sub:
+            use_substring = False
+            if value.startswith("sub:"):
+                value = value[4:]
+                use_substring = True
+
+            # figure out what we're going to compare against
+            compare_target = None
+            if directive.lower() == "file_ext":
+                if "." not in file_path:
+                    compare_target = ""
+                else:
+                    compare_target = file_path.rsplit(".", maxsplit=1)[1]
+
+            elif directive.lower() == "mime_type":
+                # have we determined the mime type for this file yet?
+                if mime_type is None:
+                    if not file_path:
+                        mime_type = ""
+                    else:
+                        p = Popen(["file", "-b", "--mime-type", file_path], stdout=PIPE)
+                        mime_type = p.stdout.read().decode().strip()
+                        log.debug("got mime type {} for {}".format(mime_type, file_path))
+
+                compare_target = mime_type
+
+            elif directive.lower() == "file_name":
+                compare_target = os.path.basename(file_path)
+
+            elif directive.lower() == "full_path":
+                compare_target = file_path
+
+            else:
+                # not a meta tag we're using
+                # log.debug("not a valid meta directive {}".format(directive))
+                continue
+
+            log.debug("compare target is {} for directive {}".format(compare_target, directive))
+
+            # figure out how to compare what is supplied by the user to the search target
+            if use_regex:
+                compare_function = lambda user_supplied, target: re.search(user_supplied, target, re.IGNORECASE)
+            elif use_substring:
+                compare_function = lambda user_supplied, target: user_supplied.lower() in target.lower()
+            else:
+                compare_function = lambda user_supplied, target: user_supplied.lower() == target.lower()
+
+            matches = False
+            for search_item in [x.strip() for x in value.lower().split(",")]:
+                matches = matches or compare_function(search_item, compare_target)
+                # log.debug("search item {} vs compare target {} matches {}".format(search_item, compare_target, matches))
+
+            if (inverted and matches) or (not inverted and not matches):
+                #log.debug(
+                    #"skipping yara rule {} for file {} directive {} list {} negated {} regex {} subsearch {}".format(
+                        #match_result.rule, file_path, directive, value, inverted, use_regex, use_substring
+                    #)
+                #)
+                return False
+
+        return True
+
+    return filter_check
+
+
+class YaraRule:
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+        self.source = None
+        self.parsed_rule = None
+        self.yara_context = None
+
+    def load(self) -> str:
+        with open(self.file_path, "r") as fp:
+            self.source = fp.read()
+
+        return self.source
+
+    def parse(self):
+        parser = plyara.Plyara()
+        self.parsed_rule = parser.parse_string(self.source)
+
+    def compile(self):
+        self.yara_context = yara.compile(source=self.source)
 
 
 class YaraJSONEncoder(json.JSONEncoder):
@@ -713,6 +844,19 @@ class YaraScanner(object):
                 print(row)
             print("END STRING EXECUTION ERRORS")
 
+    #
+    # how this will work
+    # parse each rule
+    # create a function based on the meta data
+    # rule --> function
+    # default is return True
+    # for each scan
+    # for each rule, if function() then include rule
+    # sort rules by name
+    # hash based on joined rule names --> yara context
+    # if no context then compile it
+    #
+
     def load_rules(self, external_vars=DEFAULT_YARA_EXTERNALS):
         if self.auto_compile_rules:
             rules_hash = get_rules_md5(self.get_namespace_dict())
@@ -783,25 +927,36 @@ class YaraScanner(object):
             self.rules = None
             return False
 
+        self.prefilter_checks = {}
         for namespace in all_files.keys():
+            self.prefilter_checks[namespace] = {} # key = rule name, value = function
             for file_path in all_files[namespace]:
                 with open(file_path, "r") as fp:
                     log.debug("loading namespace {} rule file {}".format(namespace, file_path))
-                    data = fp.read()
+                    yara_source = fp.read()
 
                     try:
                         # compile the file as a whole first, make sure that works
-                        rule_context = yara.compile(source=data, externals=external_vars)
+                        rule_context = yara.compile(source=yara_source, externals=external_vars)
                         rule_count += 1
                     except Exception as e:
                         log.error("unable to compile {}: {}".format(file_path, str(e)))
                         continue
 
+                    # parse this rule for meta data
+
+
+                    # TODO create the function based on the meta data
+                    rule_name = "blah"
+                    dummy_function = lambda x: True
+
+                    self.prefilter_checks[namespace][rule_name] = dummy_function
+
                     # then we just store the source to be loaded all at once in the compilation that gets used
                     if namespace not in sources:
                         sources[namespace] = []
 
-                    sources[namespace].append(data)
+                    sources[namespace].append(yara_source)
 
         for namespace in sources.keys():
             sources[namespace] = "\r\n".join(sources[namespace])

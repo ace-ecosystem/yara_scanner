@@ -6,11 +6,18 @@ import time
 from subprocess import Popen
 
 import pytest
+import plyara
 
 from yara_scanner import (ALL_RESULT_KEYS, RESULT_KEY_META,
                           RESULT_KEY_NAMESPACE, RESULT_KEY_RULE,
                           RESULT_KEY_STRINGS, RESULT_KEY_TAGS,
-                          RESULT_KEY_TARGET, YaraScanner, __version__, RulesNotLoadedError)
+                          RESULT_KEY_TARGET, YaraScanner, __version__, RulesNotLoadedError,
+                          META_FILTER_FILE_EXT,
+                          META_FILTER_FILE_NAME,
+                          META_FILTER_FULL_PATH,
+                          META_FILTER_MIME_TYPE,
+                          extract_filters_from_metadata,
+                          create_filter_check)
 
 def create_file(path, content):
     dir = os.path.dirname(path)
@@ -37,6 +44,87 @@ def repo(shared_datadir):
     Popen(['git', '-C', repo_path, 'add', '*.yar']).wait()
     Popen(['git', '-C', repo_path, 'commit', '-m', 'initial commit']).wait()
     return repo_path
+
+YARA_RULE_NO_VALID_META = """ rule test { 
+    meta:
+        hello = "world"
+    strings:
+        $a = "b"
+    condition:
+       any of them
+} """
+
+YARA_RULE_FILE_EXT = """ rule test { 
+    meta:
+        file_ext = "bas"
+    strings:
+        $a = "b"
+    condition:
+       any of them
+} """
+
+YARA_RULE_MULTIPLE_META = """ rule test { 
+    meta:
+        file_ext = "bas"
+        file_name = "something"
+    strings:
+        $a = "b"
+    condition:
+       any of them
+} """
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('meta_dicts,expected_dict', [
+    ({}, {}),
+    (plyara.Plyara().parse_string(YARA_RULE_NO_VALID_META)[0]['metadata'], {}),
+    (plyara.Plyara().parse_string(YARA_RULE_FILE_EXT)[0]['metadata'], { "file_ext": "bas"}),
+    (plyara.Plyara().parse_string(YARA_RULE_MULTIPLE_META)[0]['metadata'], { "file_ext": "bas", "file_name": "something"}),
+])
+def test_extract_filters_from_metadata(meta_dicts, expected_dict):
+    assert extract_filters_from_metadata(meta_dicts) == expected_dict
+
+@pytest.mark.unit
+@pytest.mark.parametrize('filters, target, result', [
+    # test file_ext
+    ({META_FILTER_FILE_EXT: 'bas'}, 'target.bas', True),
+    ({META_FILTER_FILE_EXT: 'bas'}, 'TARGET.BAS', True),
+    ({META_FILTER_FILE_EXT: 'bas,exe'}, 'target.bas', True),
+    ({META_FILTER_FILE_EXT: 'bas'}, 'target.exe', False),
+    ({META_FILTER_FILE_EXT: 'bas,com'}, 'target.exe', False),
+    # test file_name
+    ({META_FILTER_FILE_NAME: 'target.bas'}, 'target.bas', True),
+    ({META_FILTER_FILE_NAME: 'target.bas'}, 'TARGET.BAS', True),
+    ({META_FILTER_FILE_NAME: 'target.bas,target.exe'}, 'target.bas', True),
+    ({META_FILTER_FILE_NAME: 'target.bas'}, 'target.exe', False),
+    ({META_FILTER_FILE_NAME: 'target.bas,target.com'}, 'target.exe', False),
+    # test full_path
+    ({META_FILTER_FILE_NAME: r'C:\WINDOWS\target.bas'}, r'C:\WINDOWS\target.bas', True),
+    ({META_FILTER_FILE_NAME: r'C:\WINDOWS\target.bas'}, r'C:\WINDOWS\TARGET.BAS', True),
+    ({META_FILTER_FILE_NAME: r'C:\WINDOWS\target.bas'}, r'D:\WINDOWS\target.bas', False),
+    # test inversion logic
+    ({META_FILTER_FILE_EXT: '!bas'}, 'target.bas', False),
+    ({META_FILTER_FILE_EXT: '!bas'}, 'target.exe', True),
+    ({META_FILTER_FILE_EXT: '!bas,exe'}, 'target.exe', False),
+    # test substring
+    ({META_FILTER_FILE_NAME: 'sub:test'}, 'test.exe', True),
+    ({META_FILTER_FILE_NAME: 'sub:test'}, 'rest.exe', False),
+    ({META_FILTER_FILE_NAME: 'sub:test'}, 'thattest.exe', True),
+    # test regex
+    ({META_FILTER_FILE_NAME: r're:test\.(bas|exe)'}, 'test.exe', True),
+    ({META_FILTER_FILE_NAME: r're:test\.(bas|exe)'}, 'TEST.EXE', True),
+    ({META_FILTER_FILE_NAME: r're:test\.(bas|exe)'}, 'test.bas', True),
+    ({META_FILTER_FILE_NAME: r're:test\.(bas|exe)'}, 'test.com', False),
+    # test filter combinations
+    ({META_FILTER_FILE_EXT: 'bas',
+      META_FILTER_FILE_NAME: 'sub:targ'}, 'target.bas', True),
+    ({META_FILTER_FILE_EXT: 'bas',
+      META_FILTER_FILE_NAME: 'sub:targ'}, 'tarfet.bas', False),
+])
+def test_create_filter_check(filters, target, result):
+    filter_check = create_filter_check(filters)
+    assert filter_check(target) == result
+
 
 @pytest.mark.integration
 def test_signature_dir_load(scanner):
