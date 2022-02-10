@@ -69,9 +69,9 @@ import progress.bar
 import yara
 
 
+# DEPRECATED
 class RulesNotLoadedError(Exception):
     """Raised when a call is made to scan before any rules have been loaded."""
-
     pass
 
 
@@ -219,6 +219,19 @@ def is_yara_file(file_path: str) -> bool:
         return True
 
     return False
+
+def extract_filters_from_metadata(metadata: list[dict]) -> dict[str, str]:
+    """Extract the meta directives for filtering.
+    meta_dicts is the list of dicts that is the metadata field of what is returned by plyara
+    Returns the dict of filter_name: filter_value"""
+
+    result = {}
+    for meta_dict in metadata:
+        for key, value in meta_dict.items():
+            if key in VALID_META_FILTERS:
+                result[key] = value
+
+    return result
 
 #
 # filter chaining
@@ -449,26 +462,17 @@ class YaraRule:
         self.parsed_rule = parsed_rule
         # the namespace, if provided, that this rule came from
         self.namespace = namespace if namespace else DEFAULT_NAMESPACE
+
         # filtering function for this rule
-        self.filter_check = create_filter_check(self.extract_filters_from_metadata())
+        if 'metadata' in self.parsed_rule:
+            self.filter_check = create_filter_check(extract_filters_from_metadata(self.parsed_rule['metadata']))
+        else:
+            # if this rule does not have metadata then it is included in all yara contexts
+            self.filter_check = lambda x: True
+
         # as long as this is set to True this rule can be used for scanning
         self.valid = True
 
-    def extract_filters_from_metadata(self) -> dict[str, str]:
-        """Extract the meta directives for filtering.
-        meta_dicts is the list of dicts that is the metadata field of what is returned by plyara
-        Returns the dict of filter_name: filter_value"""
-
-        if 'metadata' not in self.parsed_rule:
-            return {}
-
-        result = {}
-        for meta_dict in self.parsed_rule['metadata']:
-            for key, value in meta_dict.items():
-                if key in VALID_META_FILTERS:
-                    result[key] = value
-
-        return result
 
     def invalidate(self):
         self.valid = False
