@@ -1,9 +1,11 @@
 import logging
+import os
 import os.path
 import shutil
 import time
 
-from subprocess import Popen
+import subprocess
+from subprocess import Popen, PIPE, DEVNULL
 
 import pytest
 import plyara
@@ -16,8 +18,29 @@ from yara_scanner import (ALL_RESULT_KEYS, RESULT_KEY_META,
                           META_FILTER_FILE_NAME,
                           META_FILTER_FULL_PATH,
                           META_FILTER_MIME_TYPE,
-                          extract_filters_from_metadata,
-                          create_filter_check)
+                          DEFAULT_NAMESPACE,
+                          DEFAULT_TIMEOUT,
+                          create_filter_check,
+                          generate_context_key,
+                          get_current_repo_commit,
+                          is_yara_file,
+                          YaraRuleFile,
+                          YaraRuleDirectory,
+                          YaraRuleRepository,
+                          YaraContext,
+                          )
+
+from tests.util import requires_git
+
+def _generate_yara_rule(name: str) -> str:
+    return f"""
+rule {name} {{ 
+    strings:
+        $ = "hello world"
+
+    condition:
+        all of them
+}}"""
 
 def create_file(path, content):
     dir = os.path.dirname(path)
@@ -31,19 +54,7 @@ def create_file(path, content):
 
 @pytest.fixture
 def scanner(shared_datadir):
-    s = YaraScanner(signature_dir=str(shared_datadir / 'signatures'))
-    s.load_rules()
-    return s
-
-@pytest.fixture
-def repo(shared_datadir):
-    repo_path = str(shared_datadir / 'signatures' / 'ruleset_a')
-    Popen(['git', '-C', repo_path, 'init']).wait()
-    Popen(['git', '-C', repo_path, 'config', 'user.name', 'Test User']).wait()
-    Popen(['git', '-C', repo_path, 'config', 'user.email', 'test_user@localhost']).wait()
-    Popen(['git', '-C', repo_path, 'add', '*.yar']).wait()
-    Popen(['git', '-C', repo_path, 'commit', '-m', 'initial commit']).wait()
-    return repo_path
+    return YaraScanner(signature_dir=str(shared_datadir / 'signatures'))
 
 YARA_RULE_NO_VALID_META = """ rule test { 
     meta:
@@ -125,20 +136,426 @@ def test_create_filter_check(filters, target, result):
     filter_check = create_filter_check(filters)
     assert filter_check(target) == result
 
+@pytest.mark.unit
+def test_YaraRuleFile_file_missing():
+    yara_rule_file = YaraRuleFile('missing.yar')
+    assert yara_rule_file.is_error_state
+    # no YaraRule object should be loaded
+    assert not yara_rule_file.yara_rules
 
-@pytest.mark.integration
-def test_signature_dir_load(scanner):
-    # there should be two loaded directories
+@pytest.mark.unit
+def test_YaraRuleFile_invalid_syntax(datadir):
+    yara_rule_file = YaraRuleFile(str(datadir / 'invalid_syntax.yar'))
+    assert yara_rule_file.is_error_state
+    assert yara_rule_file.compile_error is not None
+    # no YaraRule object should be loaded
+    assert not yara_rule_file.yara_rules
+
+@pytest.mark.unit
+def test_YaraRuleFile_valid_syntax(datadir):
+    yara_rule_file = YaraRuleFile(str(datadir / 'valid_syntax.yar'))
+    assert not yara_rule_file.is_error_state
+    assert yara_rule_file.compile_error is None
+    assert yara_rule_file.plyara_error is None
+    # a single yara rule should be loaded
+    assert len(yara_rule_file.yara_rules) == 1
+    assert yara_rule_file.last_mtime is not None
+    assert yara_rule_file.namespace == DEFAULT_NAMESPACE
+
+@pytest.mark.unit
+def test_YaraRuleFile_file_modified(datadir):
+    file_path = str(datadir / 'valid_syntax.yar')
+    yara_rule_file = YaraRuleFile(file_path)
+    with open(file_path, 'w') as fp:
+        fp.write("""
+rule updated_rule {
+    strings:
+        $ = "test"
+    condition:
+        any of them
+}""")
+
+    # keep a reference to this rule
+    yara_rule = yara_rule_file.yara_rules[0]
+    yara_rule.is_valid
+    assert yara_rule_file.is_modified
+    assert yara_rule_file.update()
+    # after the file is updated, the original YaraRule object is no longer valid
+    assert not yara_rule.is_valid
+    # not modified as this point
+    assert not yara_rule_file.is_modified
+
+@pytest.mark.unit
+def test_YaraRuleFile_good_failed_fixed(datadir):
+    # yara file is good initially
+    file_path = str(datadir / 'valid_syntax.yar')
+    yara_rule_file = YaraRuleFile(file_path)
+
+    # keep a reference to the original rule
+    yara_rule = yara_rule_file.yara_rules[0]
+    assert yara_rule.is_valid
+
+    # then someone makes a mistake
+    with open(file_path, 'w') as fp:
+        fp.write("""
+rule whoops {
+    strings:
+        $ = "test"
+    condition:
+        all of tham 
+}""")
+
+    assert yara_rule_file.is_modified
+    assert not yara_rule_file.update()
+    assert yara_rule_file.is_error_state
+    assert yara_rule_file.compile_error is not None
+    assert not yara_rule_file.yara_rules
+
+    # someone fixes it
+    with open(file_path, 'w') as fp:
+        fp.write("""
+rule whoops {
+    strings:
+        $ = "test"
+    condition:
+        all of them
+}""")
+
+    assert yara_rule_file.is_modified
+    assert yara_rule_file.update()
+    assert not yara_rule_file.is_error_state
+    assert yara_rule_file.compile_error is None
+
+@pytest.mark.parametrize('file_path,result', [
+    ('test.yar', True),
+    ('test.yara', True),
+    ('TEST.YAR', True),
+    ('TEST.YARA', True),
+    ('test.txt', False)
+])
+@pytest.mark.unit
+def test_is_yara_file(file_path, result):
+    assert is_yara_file(file_path) == result
+
+@pytest.mark.unit
+def test_YaraRuleDirectory_new_empty(tmpdir):
+    dir_path = str(tmpdir.mkdir("rules"))
+    rule_dir = YaraRuleDirectory(dir_path)
+    # should be initially empty
+    assert not rule_dir.tracked_files
+
+@pytest.mark.unit
+def test_YaraRuleDirectory_new_single_rule(tmpdir):
+    dir_path = str(tmpdir.mkdir("rules"))
+    with open(os.path.join(dir_path, "test.yar"), "w") as fp:
+        fp.write(_generate_yara_rule("rule_1"))
+
+    rule_dir = YaraRuleDirectory(dir_path)
+    assert len(rule_dir.tracked_files) == 1
+
+@pytest.mark.unit
+def test_YaraRuleDirectory_new_multi_rules(tmpdir):
+    dir_path = str(tmpdir.mkdir("rules"))
+    for i in range(2):
+        with open(os.path.join(dir_path, f"test_{i}.yar"), "w") as fp:
+            fp.write(_generate_yara_rule(f"rule_{i}"))
+
+    rule_dir = YaraRuleDirectory(dir_path)
+    assert len(rule_dir.tracked_files) == 2
+
+@pytest.mark.unit
+def test_YaraRuleDirectory_remove_missing_files(tmp_path):
+    dir_path = tmp_path / "rules"
+    dir_path.mkdir()
+    rule_path = dir_path / "test.yar"
+    rule_path.write_text(_generate_yara_rule("rule_1"))
+    rule_dir = YaraRuleDirectory(dir_path)
+    assert len(rule_dir.tracked_files) == 1
+    rule_path.unlink()
+    rule_dir.refresh()
+    assert len(rule_dir.tracked_files) == 0
+
+@pytest.mark.unit
+def test_YaraRuleDirectory_update_new_file(tmpdir):
+    dir_path = str(tmpdir.mkdir("rules"))
+    rule_dir = YaraRuleDirectory(dir_path)
+    # initially empty
+    assert not rule_dir.tracked_files
+
+    with open(os.path.join(dir_path, "test.yar"), "w") as fp:
+        fp.write(_generate_yara_rule("test_rule"))
+
+    rule_dir.refresh()
+    assert len(rule_dir.tracked_files) == 1
+
+@pytest.mark.unit
+def test_YaraRuleDirectory_update_existing_file(tmp_path):
+    dir_path = tmp_path / "rules"
+    dir_path.mkdir()
+    rule_path = dir_path / "test.yar"
+    rule_path.write_text(_generate_yara_rule("test_rule"))
+    rule_dir = YaraRuleDirectory(str(dir_path))
+    # grab the reference to the yara rule file
+    yara_rule_file = rule_dir.tracked_files[str(rule_path)]
+    # and the yara rule
+    yara_rule = yara_rule_file.yara_rules[0]
+    assert yara_rule.is_valid
+    assert not yara_rule_file.is_modified
+    rule_dir.refresh()
+    # nothing changed so should still be valid
+    assert yara_rule.is_valid
+    assert not yara_rule_file.is_modified
+
+    rule_path.write_text(_generate_yara_rule("test_rule_2"))
+    assert yara_rule_file.is_modified
+    rule_dir.refresh()
+    # now it should be modified
+    assert not yara_rule_file.is_modified
+    # and now the old one should be invalid
+    assert not yara_rule.is_valid
+    # and there should be a new YaraRule object
+    assert not (yara_rule_file.yara_rules[0] is yara_rule)
+
+@pytest.mark.unit
+def test_get_current_repo_commit(tmp_path):
+    rule_dir = tmp_path / "rules"
+    rule_dir.mkdir()
+    rule_path = rule_dir / "test_rule.yar"
+    rule_path.write_text(_generate_yara_rule("test_rule"))
+
+    # intially not a git repo
+    assert get_current_repo_commit(str(rule_dir)) is None
+
+    # is a repo but does not have a commit
+    subprocess.run(['git', '-C', str(rule_dir), 'init'], stdout=DEVNULL, stderr=DEVNULL, check=True)
+    assert get_current_repo_commit(str(rule_dir)) is None
+
+    # has a commit
+    subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule.yar'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    current_commit = get_current_repo_commit(str(rule_dir))
+    assert current_commit
+
+    rule_path = rule_dir / "test_rule_2.yar"
+    rule_path.write_text(_generate_yara_rule("test_rule_2"))
+    subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule_2.yar'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    next_commit = get_current_repo_commit(str(rule_dir))
+    assert next_commit
+
+    assert current_commit != next_commit
+
+@pytest.mark.unit
+def test_YaraRuleRepository_new(tmp_path):
+    rule_dir = tmp_path / "rules"
+    rule_dir.mkdir()
+    rule_path = rule_dir / "test_rule.yar"
+    rule_path.write_text(_generate_yara_rule("test_rule"))
+
+    subprocess.run(['git', '-C', str(rule_dir), 'init'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule.yar'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+
+    yara_repo = YaraRuleRepository(str(rule_dir))
+    assert len(yara_repo.tracked_files) == 1
+
+@pytest.mark.unit
+def test_YaraRuleRepository_rule_modified(tmp_path):
+    rule_dir = tmp_path / "rules"
+    rule_dir.mkdir()
+    rule_path = rule_dir / "test_rule.yar"
+    rule_path.write_text(_generate_yara_rule("test_rule"))
+
+    subprocess.run(['git', '-C', str(rule_dir), 'init'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule.yar'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+
+    yara_repo = YaraRuleRepository(str(rule_dir))
+    assert len(yara_repo.tracked_files) == 1
+
+    # keep a reference to the YaraRule
+    yara_rule = yara_repo.tracked_files[str(rule_path)].yara_rules[0]
+
+    # update the yara rule
+    rule_path.write_text(_generate_yara_rule("different_rule"))
+    yara_repo.refresh()
+
+    # yara rule should still be valid because the commit did not change
+    assert yara_rule.is_valid
+
+    # commit the changes
+    subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule.yar'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    yara_repo.refresh()
+
+    # now the rule should be invalid
+    assert not yara_rule.is_valid
+
+@pytest.mark.parametrize('yara_rule_source,expected_result', [
+    # test single rule
+    ( _generate_yara_rule("test_rule"), "test_rule" ),
+    # test multiple rules
+    ( f'{_generate_yara_rule("test_rule_1")}\n{_generate_yara_rule("test_rule_2")}', "test_rule_1,test_rule_2" ),
+    # order does not matter
+    ( f'{_generate_yara_rule("test_rule_2")}\n{_generate_yara_rule("test_rule_1")}', "test_rule_1,test_rule_2" ),
+])
+@pytest.mark.unit
+def test_generate_context_key(yara_rule_source, expected_result, tmp_path):
+    rule_file = tmp_path / "rule.yar"
+    rule_file.write_text(yara_rule_source)
+    yara_rule_file = YaraRuleFile(str(rule_file))
+
+    assert generate_context_key(yara_rule_file.yara_rules) == expected_result
+
+@pytest.mark.unit
+def test_generate_context_key_empty_list(tmp_path):
+    assert generate_context_key([]) == ''
+
+@pytest.mark.unit
+def test_YaraContext_new(tmp_path):
+    rule_file = tmp_path / "rule.yar"
+    yara_source = _generate_yara_rule("test_rule")
+    rule_file.write_text(yara_source)
+    yara_rule_file = YaraRuleFile(str(rule_file))
+    yara_context = YaraContext(yara_rules=yara_rule_file.yara_rules)
+    # the source won't be exactly the same
+    assert len(yara_context.yara_rules) == 1
+    assert len(yara_context.yara_rule_files) == 0
+
+@pytest.mark.unit
+def test_YaraContext_new_from_file(tmp_path):
+    rule_file = tmp_path / "rule.yar"
+    yara_source = _generate_yara_rule("test_rule")
+    rule_file.write_text(yara_source)
+    yara_rule_file = YaraRuleFile(str(rule_file))
+    yara_context = YaraContext(yara_rule_files=[yara_rule_file])
+    # the source should be exactly the same
+    assert yara_context.sources[DEFAULT_NAMESPACE] == yara_source
+    assert len(yara_context.yara_rules) == 0
+    assert len(yara_context.yara_rule_files) == 1
+
+@pytest.mark.unit
+def test_YaraContext_yara_rule_modified(tmp_path):
+    rule_file = tmp_path / "rule.yar"
+    yara_source = _generate_yara_rule("test_rule")
+    rule_file.write_text(yara_source)
+    yara_rule_file = YaraRuleFile(str(rule_file))
+    yara_context = YaraContext(yara_rules=yara_rule_file.yara_rules)
+    assert yara_context.is_valid
+    yara_rule_file.update()
+    # after the file changes the context is no longer valid
+    assert not yara_context.is_valid
+
+@pytest.mark.unit
+def test_YaraScanner_new():
+    scanner = YaraScanner()
+    assert not scanner.tracked_files
+    assert not scanner.tracked_dirs
+    assert not scanner.tracked_repos
+    assert scanner.default_timeout == DEFAULT_TIMEOUT
+    assert not scanner.yara_contexts
+
+@pytest.mark.unit
+def test_YaraScanner_track_yara_file(tmp_path):
+    rule_path = tmp_path / "rule.yar"
+    rule_path.write_text(_generate_yara_rule("test_rule"))
+
+    scanner = YaraScanner()
+    scanner.track_yara_file(str(rule_path))
+    assert len(scanner.tracked_files) == 1
+    assert len(scanner.all_yara_rule_files) == 1
+
+@pytest.mark.unit
+def test_YaraScanner_track_yara_dir(tmp_path):
+    rule_dir = tmp_path / "rules"
+    rule_dir.mkdir()
+    rule_path = rule_dir / "test_rule.yar"
+    rule_path.write_text(_generate_yara_rule("test_rule"))
+
+    scanner = YaraScanner()
+    scanner.track_yara_dir(str(rule_dir))
+    assert len(scanner.tracked_dirs) == 1
+    assert len(scanner.all_yara_rule_files) == 1
+
+@requires_git
+@pytest.mark.unit
+def test_YaraScanner_track_yara_repo(tmp_path):
+    rule_dir = tmp_path / "rules"
+    rule_dir.mkdir()
+    
+    rule_path = rule_dir / "test_rule.yar"
+    rule_path.write_text(_generate_yara_rule("test_rule"))
+
+    result = subprocess.run(['git', '-C', str(rule_dir), 'init'], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule.yar'], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+
+    scanner = YaraScanner()
+    scanner.track_yara_repository(str(rule_dir))
+    assert len(scanner.tracked_repos) == 1
+    assert len(scanner.all_yara_rule_files) == 1
+
+@pytest.mark.unit
+def test_YaraScanner_load_signature_directory(shared_datadir):
+    scanner = YaraScanner(signature_dir=str(shared_datadir / 'signatures'))
     assert len(scanner.tracked_dirs) == 2
-    for dir_name in scanner.tracked_dirs.keys():
-        # and one file from each directory
-        assert len(scanner.tracked_dirs[dir_name]) == 1
+    assert len(scanner.all_yara_rule_files) == 2
+    # each directory has one file
+    for dir_path, yara_dir in scanner.tracked_dirs.items():
+        assert len(yara_dir.tracked_files) == 1
 
-    assert not scanner.check_rules()
-    assert scanner.load_rules()
+@pytest.mark.unit
+def test_YaraScanner_check_rules(tmp_path):
+    # a single yara rule
+    single_rule_path = tmp_path / "test_rule.yar"
+    single_rule_path.write_text(_generate_yara_rule("single_rule"))
 
-@pytest.mark.integration
-def test_data_scan_matching(scanner):
+    # a directory of yara rules
+    rule_dir = tmp_path / "rules"
+    rule_dir.mkdir()
+    dir_rule_path = rule_dir / "dir_rule.yar"
+    dir_rule_path.write_text(_generate_yara_rule("dir_rule"))
+
+    # a repo of yara rules
+    repo_dir = tmp_path / "rule_repo"
+    repo_dir.mkdir()
+    repo_rule_path = repo_dir / "repo_rule.yar"
+    repo_rule_path.write_text(_generate_yara_rule("repo_rule"))
+
+    result = subprocess.run(['git', '-C', str(repo_dir), 'init'], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(['git', '-C', str(repo_dir), 'add', 'repo_rule.yar'], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(['git', '-C', str(repo_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+
+    scanner = YaraScanner()
+    scanner.track_yara_file(str(single_rule_path))
+    scanner.track_yara_dir(str(rule_dir))
+    scanner.track_yara_repository(str(repo_dir))
+
+    # get references to all the loaded YaraRule objects
+    yara_rules = [_.yara_rules[0] for _ in scanner.all_yara_rule_files]
+    assert len(yara_rules) == 3
+
+    scanner.check_rules()
+
+    # all the rules should still be valid because nothing has changed
+    assert all([_.is_valid for _ in yara_rules])
+
+    # modify all the rules
+    single_rule_path.write_text(_generate_yara_rule("updated_single_rule"))
+    dir_rule_path.write_text(_generate_yara_rule("updated_dir_rule"))
+    repo_rule_path.write_text(_generate_yara_rule("updated_repo_rule"))
+    result = subprocess.run(['git', '-C', str(repo_dir), 'commit', '-a', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+
+    scanner.check_rules()
+
+    # all the rules should still be invalid because everything changed
+    assert all([not _.is_valid for _ in yara_rules])
+
+    yara_rules = [_.yara_rules[0] for _ in scanner.all_yara_rule_files]
+    assert len(yara_rules) == 3
+
+@pytest.mark.unit
+def test_YaraScanner_scan_data(scanner):
     # this should match
     assert scanner.scan_data('test_rule_1')
     # this should also match
@@ -147,7 +564,7 @@ def test_data_scan_matching(scanner):
     assert not scanner.scan_data('random data')
 
 @pytest.mark.integration
-def test_data_scan_results(scanner):
+def test_YaraScanner_scan_results(scanner):
     scanner.scan_data('test_rule_1')
     # this should match tests/data/signatures/ruleset_a/rule_1.yar
     assert len(scanner.scan_results) == 1
@@ -166,7 +583,7 @@ def test_data_scan_results(scanner):
     assert len(scanner.scan_results) == 2
 
 @pytest.mark.integration
-def test_file_scan_results(scanner, shared_datadir):
+def test_YaraScanner_file_scan_results(scanner, shared_datadir):
     assert scanner.scan(str(shared_datadir / 'scan_targets' / 'scan_target_1.txt'))
 
     assert os.path.basename(scanner.scan_results[0][RESULT_KEY_TARGET]) == 'scan_target_1.txt'
@@ -175,188 +592,6 @@ def test_file_scan_results(scanner, shared_datadir):
     assert scanner.scan_results[0][RESULT_KEY_RULE] == 'rule_1'
     assert scanner.scan_results[0][RESULT_KEY_STRINGS] == [(0, '$', b'test_rule_1')]
     assert scanner.scan_results[0][RESULT_KEY_TAGS] == ['tag_1']
-
-@pytest.mark.integration
-def test_yara_rule_blacklisting(scanner):
-    assert scanner.scan_data('test_rule_1')
-    scanner.blacklist_rule('rule_1')
-    scanner.load_rules()
-    assert not scanner.scan_data('test_rule_1')
-
-@pytest.mark.integration
-def test_compiled_file_tracking(shared_datadir):
-    target_file = str(shared_datadir / 'signatures' / 'compiled.cyar')
-    scanner = YaraScanner()
-    scanner.track_compiled_yara_file(target_file)
-
-    sample_data = str(shared_datadir / 'scan_targets' / 'scan_target_1.txt')
-    # file does not exist yet
-    with pytest.raises(RulesNotLoadedError):
-        scanner.scan(sample_data)
-
-    # load a yara rule, compile and save compilation
-    source_rule = str(shared_datadir / 'signatures' / 'ruleset_a' / 'rule_1.yar')
-    temp = YaraScanner()
-    temp.track_yara_file(source_rule)
-    temp.load_rules()
-    temp.save_compiled_rules(target_file)
-    assert os.path.exists(target_file)
-
-    # rules now exists so this should match
-    assert scanner.check_rules()
-    assert scanner.scan(sample_data)
-
-    # recompile with a different rule
-    time.sleep(0.01) # XXX depending on the mtime not super precise
-    source_rule = str(shared_datadir / 'signatures' / 'ruleset_b' / 'rule_1.yar')
-    temp = YaraScanner()
-    temp.track_yara_file(source_rule)
-    temp.load_rules()
-    temp.save_compiled_rules(target_file)
-    assert os.path.exists(target_file)
-
-    assert scanner.check_rules()
-    scanner.load_rules()
-
-    # the rule changed so this should NOT match
-    assert not scanner.scan(sample_data)
-
-    # recompile again with the original rule
-    time.sleep(0.01) # XXX depending on the mtime not super precise
-    source_rule = str(shared_datadir / 'signatures' / 'ruleset_a' / 'rule_1.yar')
-    temp = YaraScanner()
-    temp.track_yara_file(source_rule)
-    temp.load_rules()
-    temp.save_compiled_rules(target_file)
-    assert os.path.exists(target_file)
-
-    assert scanner.check_rules()
-    scanner.load_rules()
-    assert scanner.scan(sample_data)
-
-    # delete the compiled rule file
-    os.remove(target_file)
-
-    assert not scanner.check_rules()
-    scanner.load_rules()
-    # should still be ok
-    assert scanner.scan(sample_data)
-
-@pytest.mark.integration
-def test_auto_compile(shared_datadir, tmpdir, caplog):
-    caplog.set_level(logging.DEBUG)
-    compiled_rules_dir = tmpdir.mkdir('compiled_rules')
-    scanner = YaraScanner(
-            signature_dir=str(shared_datadir / 'signatures'), 
-            auto_compile_rules=True, 
-            auto_compiled_rules_dir=compiled_rules_dir)
-
-    scanner.load_rules()
-    # there should be a single .cyar file in tempdir
-    file_list = os.listdir(compiled_rules_dir)
-    assert len(file_list) == 1
-    assert file_list[0].endswith('.cyar')
-
-    scanner = YaraScanner(
-            signature_dir=str(shared_datadir / 'signatures'), 
-            auto_compile_rules=True, 
-            auto_compiled_rules_dir=compiled_rules_dir)
-
-    # make sure the compiled rules were used
-    scanner.load_rules()
-    assert 'up to date compiled rules already exist at' in caplog.text
-
-@pytest.mark.integration
-def test_single_file_tracking(scanner, shared_datadir):
-    s = YaraScanner()
-    yara_rule_path = str(shared_datadir / 'signatures' / 'ruleset_a' / 'rule_1.yar')
-    s.track_yara_file(yara_rule_path)
-    s.load_rules()
-    assert not s.check_rules()
-    assert s.tracked_files
-    assert yara_rule_path in s.tracked_files
-    with open(yara_rule_path, 'a') as fp:
-        fp.write('\n//test')
-
-    # this should return True after the file has been modified
-    assert s.check_rules()
-    s.load_rules()
-    assert not s.check_rules()
-    with open(yara_rule_path, 'r') as fp:
-        rule_content = fp.read()
-
-    os.remove(yara_rule_path)
-    assert s.check_rules()
-    assert s.tracked_files[yara_rule_path] is None
-    assert not s.load_rules()
-
-    with open(yara_rule_path, 'w') as fp:
-        fp.write(rule_content)
-
-    assert s.check_rules()
-    assert s.load_rules()
-
-@pytest.mark.integration
-def test_dir_tracking(shared_datadir):
-    s = YaraScanner()
-    yara_dir_path = str(shared_datadir / 'signatures' / 'ruleset_a')
-    yara_rule_path = str(shared_datadir / 'signatures' / 'ruleset_a' / 'rule_1.yar')
-    s.track_yara_dir(yara_dir_path)
-    s.load_rules()
-    assert not s.check_rules()
-    assert s.tracked_dirs
-    assert len(s.tracked_dirs[yara_dir_path]) == 1
-    
-    with open(yara_rule_path, 'a') as fp:
-        fp.write('\ntest')
-
-    # this should return True after the file has been modified
-    assert s.check_rules()
-    s.load_rules()
-    assert not s.check_rules()
-    
-    os.remove(yara_rule_path)
-
-    # this should return True after the file has been deleted
-    assert s.check_rules()
-    # when files are deleted from a tracked dir they are removed from the dict tracking
-    assert not s.tracked_dirs[yara_dir_path]
-    assert not s.load_rules()
-
-    # test when a new rule is loaded
-    new_yara_rule_path = str(shared_datadir / 'signatures' / 'ruleset_a' / 'new_rule.yar')
-    with open(new_yara_rule_path, 'w') as fp:
-        fp.write("""
-    rule test_add_rule {
-        strings:
-            $ = "whatever"
-        condition:
-            all of them
-    }
-        """)
-
-    assert s.check_rules()
-    assert s.load_rules()
-    assert len(s.tracked_dirs[yara_dir_path]) == 1
-
-@pytest.mark.integration
-@pytest.mark.skipif(not shutil.which('git'), reason="missing git in PATH")
-def test_repo_tracking(repo):
-    s = YaraScanner()
-    s.track_yara_repository(repo)
-    assert s.check_rules()
-    assert s.load_rules()
-    assert not s.check_rules()
-    with open(os.path.join(repo, 'rule_1.yar'), 'a') as fp:
-        fp.write('\n// modified')
-    
-    # not considered modified until changes committed to repo
-    assert not s.check_rules()
-    Popen(['git', '-C', repo, 'add', '*.yar']).wait()
-    Popen(['git', '-C', repo, 'commit', '-m', 'modified']).wait()
-    assert s.check_rules()
-    assert s.load_rules()
-    assert not s.check_rules()
 
 #region meta_rule_tests
 meta_rule_tests = [
@@ -642,7 +877,7 @@ condition:
 
 @pytest.mark.integration
 @pytest.mark.parametrize("yara_rule_content, scan_target_name, scan_target_content, expected", meta_rule_tests)
-def test_meta_directives(tmp_path, yara_rule_content, scan_target_name, scan_target_content, expected):
+def test_YaraScanner_meta_directives(tmp_path, yara_rule_content, scan_target_name, scan_target_content, expected):
     scanner = YaraScanner()
     yara_rule_path = create_file(str(tmp_path / 'rule.yar'), yara_rule_content)
     scan_target_path = create_file(str(tmp_path / scan_target_name), scan_target_content)
