@@ -176,7 +176,7 @@ def create_filter_check(filters: dict[str, str]) -> callable:
                 log.error(f"not a valid meta directive {directive}")
                 continue
 
-            log.debug("compare target is {} for directive {}".format(compare_target, directive))
+            #log.debug("compare target is {} for directive {}".format(compare_target, directive))
 
             # figure out how to compare what is supplied by the user to the search target
             if use_regex:
@@ -259,8 +259,8 @@ class YaraRuleDirectory:
         return [_ for _ in self.tracked_files.values()]
 
     def refresh(self):
-        self.load_new_files()
         self.update_existing_files()
+        self.load_new_files()
         self.remove_missing_files()
 
     def load_new_files(self):
@@ -449,7 +449,7 @@ class YaraRuleFile:
                 rebuilt_rule = plyara.utils.rebuild_yara_rule(rule)
                 yara.compile(source=rebuilt_rule)
 
-            log.debug(f"loaded {len(rules)} from {self.file_path}")
+            log.debug(f"loaded {len(rules)} yara rules from {self.file_path}")
             for rule in rules:
                 self.yara_rules.append(YaraRule(rule, namespace=self.namespace))
 
@@ -523,17 +523,23 @@ class YaraContext:
 
         # generate the source for this yara rule context
         self.sources = {} # key = namespace, value = [] of rules
+        yara_rule_count = 0
         for yara_rule in self.yara_rules:
             if yara_rule.namespace not in self.sources:
                 self.sources[yara_rule.namespace] = []
 
             self.sources[yara_rule.namespace].append(plyara.utils.rebuild_yara_rule(yara_rule.parsed_rule))
+            yara_rule_count += 1
 
+        yara_rule_file_count = 0
         for yara_rule_file in self.yara_rule_files:
             if yara_rule_file.namespace not in self.sources:
                 self.sources[yara_rule_file.namespace] = []
 
             self.sources[yara_rule_file.namespace].append(yara_rule_file.source)
+            yara_rule_file_count += 1
+
+        log.debug(f"context created with {yara_rule_count} parsed yara rules and {yara_rule_file_count} yara files")
 
         if not self.sources:
             log.warning("creating empty yara context")
@@ -581,8 +587,8 @@ class YaraScanner:
         signature_dir=None,
         test_mode=False,
         default_timeout=DEFAULT_TIMEOUT,
-        disable_prefiltering=False,
-        disable_postfiltering=False,
+        disable_prefilter=False,
+        disable_postfilter=False,
         *args,
         **kwargs,
     ):
@@ -612,10 +618,10 @@ class YaraScanner:
         self.yara_contexts = {} # key = generate_context_key(), value = compiled yara context
 
         # if this is set then we disable prefiltering
-        self.disable_prefiltering = disable_prefiltering
+        self.disable_prefilter = disable_prefilter
 
         # if this is set then we disable postfiltering
-        self.disable_postfiltering = disable_postfiltering
+        self.disable_postfilter = disable_postfilter
 
         # a convenience function to load yara rules stored in a commonly seen organization
         if signature_dir is not None:
@@ -659,7 +665,7 @@ class YaraScanner:
         filtered_yara_rules = []
         for yara_rule_file in self.all_yara_rule_files:
             for yara_rule in yara_rule_file.yara_rules:
-                if file_path and not self.disable_prefiltering:
+                if file_path and not self.disable_prefilter:
                     if yara_rule.filter_matches(file_path):
                         filtered_yara_rules.append(yara_rule)
                 else:
@@ -1179,7 +1185,7 @@ class YaraScanner:
         self.scan_results = []
 
         # if post filtering is disabled then we return all matches
-        if self.disable_postfiltering:
+        if self.disable_postfilter:
             self.scan_results.extend(yara_matches)
         else:
             for match_result in yara_matches:
@@ -1839,11 +1845,6 @@ def main(): # pragma: no cover
         dest="yara_repos",
         help="One directory that is a git repository that contains yara rules to load. You can specify more than one of these.",
     )
-    parser.add_argument(
-        "-z",
-        "--compiled-yara-rules",
-        help="Load compiled yara rules from the specified files. This option cannot be combined with -y, -Y, or -G",
-    )
 
     parser.add_argument(
         "-c",
@@ -1855,22 +1856,6 @@ def main(): # pragma: no cover
         help="Compile the rules and exit.",
     )
 
-    parser.add_argument("-C", "--compile-to", help="Compile the rules into the given file path.")
-    parser.add_argument(
-        "-a",
-        "--auto-compile-rules",
-        default=False,
-        action="store_true",
-        help="""Automatically saved the compiled yara rules to disk.
-        Automatically loads pre-compiled rules based on MD5 hash of rule
-        content.""",
-    )
-    parser.add_argument(
-        "--auto-compiled-rules-dir",
-        help="""Specifies the directory to use to store automatically compiled
-        yara rules. Defaults to the system temp dir.""",
-    )
-
     parser.add_argument(
         "-d",
         "--signature-dir",
@@ -1878,6 +1863,20 @@ def main(): # pragma: no cover
         default=None,
         help="DEPRECATED: Use a different signature directory than the default.",
     )
+
+    parser.add_argument(
+        "--disable-prefilter",
+        dest="disable_prefilter",
+        action="store_true",
+        default=False,
+        help="Disable prefiltering rules to boost scanning performance.")
+
+    parser.add_argument(
+        "--disable-postfilter",
+        dest="disable_postfilter",
+        action="store_true",
+        default=False,
+        help="Disable postfiltering.")
 
     args = parser.parse_args()
 
@@ -1891,31 +1890,23 @@ def main(): # pragma: no cover
 
     log_levels = {0: logging.ERROR, 1: logging.WARNING, 2: logging.INFO, 3: logging.DEBUG}
     log_level = min(max(args.verbose, 0), 3)  # clamp to 0-3 inclusive
+    logging.getLogger('plyara').setLevel(logging.ERROR)
     logging.basicConfig(level=log_levels[log_level])
 
     scanner = YaraScanner(
         signature_dir=args.signature_dir,
-        auto_compile_rules=args.auto_compile_rules,
-        auto_compiled_rules_dir=args.auto_compiled_rules_dir,
+        disable_prefilter=args.disable_prefilter,
+        disable_postfilter=args.disable_postfilter,
     )
 
-    if args.compiled_yara_rules:
-        scanner.track_compiled_yara_file(args.compiled_yara_rules)
-    else:
-        for file_path in args.yara_rules:
-            scanner.track_yara_file(file_path)
+    for file_path in args.yara_rules:
+        scanner.track_yara_file(file_path)
 
-        for dir_path in args.yara_dirs:
-            scanner.track_yara_dir(dir_path)
+    for dir_path in args.yara_dirs:
+        scanner.track_yara_dir(dir_path)
 
-        for repo_path in args.yara_repos:
-            scanner.track_yara_repository(repo_path)
-
-    scanner.load_rules()
-
-    if args.compile_to:
-        scanner.save_compiled_rules(args.compile_to)
-        sys.exit(0)
+    for repo_path in args.yara_repos:
+        scanner.track_yara_repository(repo_path)
 
     if args.test:
         test_config = TestConfig()
@@ -1936,10 +1927,7 @@ def main(): # pragma: no cover
         scanner.test_rules(test_config)
         sys.exit(0)
 
-    if scanner.check_rules():
-        scanner.load_rules()
-
-    if args.compile_only or args.test or args.compile_to:
+    if args.compile_only:
         sys.exit(0)
 
     exit_result = 0
