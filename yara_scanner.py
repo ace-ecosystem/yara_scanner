@@ -13,25 +13,20 @@ A wrapper around the yara library for Python. ::
     # start tracking this yara file
     scanner.track_yara_file('/path/to/yara_file.yar')
     scanner.load_rules()
-    scanner.scan('/path/to/file/to/scan')
+    scan_results = scanner.scan('/path/to/file/to/scan')
 
-    # check to see if your yara file changed
-    if scanner.check_rules():
-        scanner.load_rules()
+    # reload yara rules
+    scanner.check_rules()
 
     # track an entire directory of yara files
     scanner.track_yara_dir('/path/to/directory')
-    scanner.load_rules()
     # did any of the yara files in this directory change?
-    if scanner.check_rules():
-        scanner.load_rules()
+    scanner.check_rules()
 
     # track a git repository of yara rules
     scanner.track_yara_repo('/path/to/git_repo')
-    scanner.load_rules()
-    # this only returns True if a new commit was added since the last check
-    if scanner.check_rules():
-        scanner.load_rules()
+    # reload the yara rules ONLY if the git commit changed
+    scanner.check_rules()
 
 """
 
@@ -62,7 +57,6 @@ import hashlib
 import tempfile
 from subprocess import PIPE, Popen
 from typing import Dict, List
-
 
 import plyara, plyara.utils
 import progress.bar
