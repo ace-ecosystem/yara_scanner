@@ -11,31 +11,39 @@ from subprocess import Popen, PIPE, DEVNULL
 import pytest
 import plyara
 
-from yara_scanner import (ALL_RESULT_KEYS, RESULT_KEY_META,
-                          RESULT_KEY_NAMESPACE, RESULT_KEY_RULE,
-                          RESULT_KEY_STRINGS, RESULT_KEY_TAGS,
-                          RESULT_KEY_TARGET, YaraScanner, __version__, RulesNotLoadedError,
-                          META_FILTER_FILE_EXT,
-                          META_FILTER_FILE_NAME,
-                          META_FILTER_FULL_PATH,
-                          META_FILTER_MIME_TYPE,
-                          DEFAULT_NAMESPACE,
-                          DEFAULT_TIMEOUT,
-                          extract_filters_from_metadata,
-                          generate_context_key,
-                          get_current_repo_commit,
-                          is_yara_file,
-                          Filterable,
-                          YaraRuleFile,
-                          YaraRuleDirectory,
-                          YaraRuleRepository,
-                          YaraContext,
-                          TestConfig,
-                          )
+from yara_scanner import (
+    ALL_RESULT_KEYS,
+    RESULT_KEY_META,
+    RESULT_KEY_NAMESPACE,
+    RESULT_KEY_RULE,
+    RESULT_KEY_STRINGS,
+    RESULT_KEY_TAGS,
+    RESULT_KEY_TARGET,
+    YaraScanner,
+    __version__,
+    RulesNotLoadedError,
+    META_FILTER_FILE_EXT,
+    META_FILTER_FILE_NAME,
+    META_FILTER_FULL_PATH,
+    META_FILTER_MIME_TYPE,
+    DEFAULT_NAMESPACE,
+    DEFAULT_TIMEOUT,
+    extract_filters_from_metadata,
+    generate_context_key,
+    get_current_repo_commit,
+    is_yara_file,
+    Filterable,
+    YaraRuleFile,
+    YaraRuleDirectory,
+    YaraRuleRepository,
+    YaraContext,
+    TestConfig,
+)
 
 from tests.util import requires_git
 
-def _generate_yara_rule(name: str, search: str="hello world", condition: str="all of them") -> str:
+
+def _generate_yara_rule(name: str, search: str = "hello world", condition: str = "all of them") -> str:
     return f"""
 rule {name} {{ 
     strings:
@@ -45,19 +53,22 @@ rule {name} {{
         {condition}
 }}"""
 
+
 def create_file(path, content):
     dir = os.path.dirname(path)
     if not os.path.isdir(dir):
         os.makedirs(dir)
 
-    with open(path, 'w') as fp:
+    with open(path, "w") as fp:
         fp.write(content)
 
     return path
 
+
 @pytest.fixture
 def scanner(shared_datadir):
-    return YaraScanner(signature_dir=str(shared_datadir / 'signatures'))
+    return YaraScanner(signature_dir=str(shared_datadir / "signatures"))
+
 
 YARA_RULE_DEPENDENCY = """
 rule rule_1 {
@@ -105,77 +116,88 @@ YARA_RULE_MULTIPLE_META = """ rule test {
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize('meta_dicts,expected_dict', [
-    ({}, {}),
-    (plyara.Plyara().parse_string(YARA_RULE_NO_VALID_META)[0]['metadata'], {}),
-    (plyara.Plyara().parse_string(YARA_RULE_FILE_EXT)[0]['metadata'], { "file_ext": "bas"}),
-    (plyara.Plyara().parse_string(YARA_RULE_MULTIPLE_META)[0]['metadata'], { "file_ext": "bas", "file_name": "something"}),
-])
+@pytest.mark.parametrize(
+    "meta_dicts,expected_dict",
+    [
+        ({}, {}),
+        (plyara.Plyara().parse_string(YARA_RULE_NO_VALID_META)[0]["metadata"], {}),
+        (plyara.Plyara().parse_string(YARA_RULE_FILE_EXT)[0]["metadata"], {"file_ext": "bas"}),
+        (
+            plyara.Plyara().parse_string(YARA_RULE_MULTIPLE_META)[0]["metadata"],
+            {"file_ext": "bas", "file_name": "something"},
+        ),
+    ],
+)
 def test_extract_filters_from_metadata(meta_dicts, expected_dict):
     assert extract_filters_from_metadata(meta_dicts) == expected_dict
 
+
 @pytest.mark.unit
-@pytest.mark.parametrize('filters, target, result', [
-    # not a valid filter
-    ({'test': 'bas'}, 'target.bas', True),
-    # test file_ext
-    ({META_FILTER_FILE_EXT: 'bas'}, 'target.bas', True),
-    ({META_FILTER_FILE_EXT: 'bas'}, 'TARGET.BAS', True),
-    ({META_FILTER_FILE_EXT: 'bas,exe'}, 'target.bas', True),
-    ({META_FILTER_FILE_EXT: 'bas'}, 'target.exe', False),
-    ({META_FILTER_FILE_EXT: 'bas,com'}, 'target.exe', False),
-    ({META_FILTER_FILE_EXT: 'bas'}, 'target', False),
-    # test file_name
-    ({META_FILTER_FILE_NAME: 'target.bas'}, 'target.bas', True),
-    ({META_FILTER_FILE_NAME: 'target.bas'}, 'TARGET.BAS', True),
-    ({META_FILTER_FILE_NAME: 'target.bas,target.exe'}, 'target.bas', True),
-    ({META_FILTER_FILE_NAME: 'target.bas'}, 'target.exe', False),
-    ({META_FILTER_FILE_NAME: 'target.bas,target.com'}, 'target.exe', False),
-    # test full_path
-    ({META_FILTER_FILE_NAME: r'C:\WINDOWS\target.bas'}, r'C:\WINDOWS\target.bas', True),
-    ({META_FILTER_FILE_NAME: r'C:\WINDOWS\target.bas'}, r'C:\WINDOWS\TARGET.BAS', True),
-    ({META_FILTER_FILE_NAME: r'C:\WINDOWS\target.bas'}, r'D:\WINDOWS\target.bas', False),
-    # test inversion logic
-    ({META_FILTER_FILE_EXT: '!bas'}, 'target.bas', False),
-    ({META_FILTER_FILE_EXT: '!bas'}, 'target.exe', True),
-    ({META_FILTER_FILE_EXT: '!bas,exe'}, 'target.exe', False),
-    # test substring
-    ({META_FILTER_FILE_NAME: 'sub:test'}, 'test.exe', True),
-    ({META_FILTER_FILE_NAME: 'sub:test'}, 'rest.exe', False),
-    ({META_FILTER_FILE_NAME: 'sub:test'}, 'thattest.exe', True),
-    # test regex
-    ({META_FILTER_FILE_NAME: r're:test\.(bas|exe)'}, 'test.exe', True),
-    ({META_FILTER_FILE_NAME: r're:test\.(bas|exe)'}, 'TEST.EXE', True),
-    ({META_FILTER_FILE_NAME: r're:test\.(bas|exe)'}, 'test.bas', True),
-    ({META_FILTER_FILE_NAME: r're:test\.(bas|exe)'}, 'test.com', False),
-    # test filter combinations
-    ({META_FILTER_FILE_EXT: 'bas',
-      META_FILTER_FILE_NAME: 'sub:targ'}, 'target.bas', True),
-    ({META_FILTER_FILE_EXT: 'bas',
-      META_FILTER_FILE_NAME: 'sub:targ'}, 'tarfet.bas', False),
-])
+@pytest.mark.parametrize(
+    "filters, target, result",
+    [
+        # not a valid filter
+        ({"test": "bas"}, "target.bas", True),
+        # test file_ext
+        ({META_FILTER_FILE_EXT: "bas"}, "target.bas", True),
+        ({META_FILTER_FILE_EXT: "bas"}, "TARGET.BAS", True),
+        ({META_FILTER_FILE_EXT: "bas,exe"}, "target.bas", True),
+        ({META_FILTER_FILE_EXT: "bas"}, "target.exe", False),
+        ({META_FILTER_FILE_EXT: "bas,com"}, "target.exe", False),
+        ({META_FILTER_FILE_EXT: "bas"}, "target", False),
+        # test file_name
+        ({META_FILTER_FILE_NAME: "target.bas"}, "target.bas", True),
+        ({META_FILTER_FILE_NAME: "target.bas"}, "TARGET.BAS", True),
+        ({META_FILTER_FILE_NAME: "target.bas,target.exe"}, "target.bas", True),
+        ({META_FILTER_FILE_NAME: "target.bas"}, "target.exe", False),
+        ({META_FILTER_FILE_NAME: "target.bas,target.com"}, "target.exe", False),
+        # test full_path
+        ({META_FILTER_FILE_NAME: r"C:\WINDOWS\target.bas"}, r"C:\WINDOWS\target.bas", True),
+        ({META_FILTER_FILE_NAME: r"C:\WINDOWS\target.bas"}, r"C:\WINDOWS\TARGET.BAS", True),
+        ({META_FILTER_FILE_NAME: r"C:\WINDOWS\target.bas"}, r"D:\WINDOWS\target.bas", False),
+        # test inversion logic
+        ({META_FILTER_FILE_EXT: "!bas"}, "target.bas", False),
+        ({META_FILTER_FILE_EXT: "!bas"}, "target.exe", True),
+        ({META_FILTER_FILE_EXT: "!bas,exe"}, "target.exe", False),
+        # test substring
+        ({META_FILTER_FILE_NAME: "sub:test"}, "test.exe", True),
+        ({META_FILTER_FILE_NAME: "sub:test"}, "rest.exe", False),
+        ({META_FILTER_FILE_NAME: "sub:test"}, "thattest.exe", True),
+        # test regex
+        ({META_FILTER_FILE_NAME: r"re:test\.(bas|exe)"}, "test.exe", True),
+        ({META_FILTER_FILE_NAME: r"re:test\.(bas|exe)"}, "TEST.EXE", True),
+        ({META_FILTER_FILE_NAME: r"re:test\.(bas|exe)"}, "test.bas", True),
+        ({META_FILTER_FILE_NAME: r"re:test\.(bas|exe)"}, "test.com", False),
+        # test filter combinations
+        ({META_FILTER_FILE_EXT: "bas", META_FILTER_FILE_NAME: "sub:targ"}, "target.bas", True),
+        ({META_FILTER_FILE_EXT: "bas", META_FILTER_FILE_NAME: "sub:targ"}, "tarfet.bas", False),
+    ],
+)
 def test_filter_check(filters, target, result):
     filterable = Filterable()
     assert filterable.filter_check(filters, target) == result
 
+
 @pytest.mark.unit
 def test_YaraRuleFile_file_missing():
-    yara_rule_file = YaraRuleFile('missing.yar')
+    yara_rule_file = YaraRuleFile("missing.yar")
     assert yara_rule_file.is_error_state
     # no YaraRule object should be loaded
     assert not yara_rule_file.yara_rules
 
+
 @pytest.mark.unit
 def test_YaraRuleFile_invalid_syntax(datadir):
-    yara_rule_file = YaraRuleFile(str(datadir / 'invalid_syntax.yar'))
+    yara_rule_file = YaraRuleFile(str(datadir / "invalid_syntax.yar"))
     assert yara_rule_file.is_error_state
     assert yara_rule_file.compile_error is not None
     # no YaraRule object should be loaded
     assert not yara_rule_file.yara_rules
 
+
 @pytest.mark.unit
 def test_YaraRuleFile_valid_syntax(datadir):
-    yara_rule_file = YaraRuleFile(str(datadir / 'valid_syntax.yar'))
+    yara_rule_file = YaraRuleFile(str(datadir / "valid_syntax.yar"))
     assert not yara_rule_file.is_error_state
     assert yara_rule_file.compile_error is None
     assert yara_rule_file.plyara_error is None
@@ -184,18 +206,21 @@ def test_YaraRuleFile_valid_syntax(datadir):
     assert yara_rule_file.last_mtime is not None
     assert yara_rule_file.namespace == DEFAULT_NAMESPACE
 
+
 @pytest.mark.unit
 def test_YaraRuleFile_file_modified(datadir):
-    file_path = str(datadir / 'valid_syntax.yar')
+    file_path = str(datadir / "valid_syntax.yar")
     yara_rule_file = YaraRuleFile(file_path)
-    with open(file_path, 'w') as fp:
-        fp.write("""
+    with open(file_path, "w") as fp:
+        fp.write(
+            """
 rule updated_rule {
     strings:
         $ = "test"
     condition:
         any of them
-}""")
+}"""
+        )
 
     # keep a reference to this rule
     yara_rule = yara_rule_file.yara_rules[0]
@@ -207,10 +232,11 @@ rule updated_rule {
     # not modified as this point
     assert not yara_rule_file.is_modified
 
+
 @pytest.mark.unit
 def test_YaraRuleFile_good_failed_fixed(datadir):
     # yara file is good initially
-    file_path = str(datadir / 'valid_syntax.yar')
+    file_path = str(datadir / "valid_syntax.yar")
     yara_rule_file = YaraRuleFile(file_path)
 
     # keep a reference to the original rule
@@ -218,14 +244,16 @@ def test_YaraRuleFile_good_failed_fixed(datadir):
     assert yara_rule.is_valid
 
     # then someone makes a mistake
-    with open(file_path, 'w') as fp:
-        fp.write("""
+    with open(file_path, "w") as fp:
+        fp.write(
+            """
 rule whoops {
     strings:
         $ = "test"
     condition:
         all of tham 
-}""")
+}"""
+        )
 
     assert yara_rule_file.is_modified
     assert not yara_rule_file.update()
@@ -234,33 +262,38 @@ rule whoops {
     assert not yara_rule_file.yara_rules
 
     # someone fixes it
-    with open(file_path, 'w') as fp:
-        fp.write("""
+    with open(file_path, "w") as fp:
+        fp.write(
+            """
 rule whoops {
     strings:
         $ = "test"
     condition:
         all of them
-}""")
+}"""
+        )
 
     assert yara_rule_file.is_modified
     assert yara_rule_file.update()
     assert not yara_rule_file.is_error_state
     assert yara_rule_file.compile_error is None
 
+
 @pytest.mark.unit
 def test_YaraRuleFile_disable_plyara(tmp_path):
-    rule_path = tmp_path / 'test.yar'
+    rule_path = tmp_path / "test.yar"
     rule_path.write_text(_generate_yara_rule("test_rule"))
     yara_rule_file = YaraRuleFile(rule_path, disable_plyara=True)
     assert yara_rule_file.disable_plyara
     # should not have any YaraRule objects loaded because they come from plyara parsing
     assert not yara_rule_file.yara_rules
 
+
 @pytest.mark.unit
 def test_YaraRuleFile_dependencies(tmp_path):
-    rule_path = tmp_path / 'test.yar'
-    rule_path.write_text("""
+    rule_path = tmp_path / "test.yar"
+    rule_path.write_text(
+        """
 rule rule_1 {
     strings:
         $ = "hello world"
@@ -274,11 +307,13 @@ rule rule_2 {
     condition:
         all of them and rule_1
 }
-""")
+"""
+    )
     yara_rule_file = YaraRuleFile(rule_path)
     # dependencies are not supported
     assert yara_rule_file.plyara_error is not None
     assert len(yara_rule_file.yara_rules) == 0
+
 
 @pytest.mark.unit
 def test_YaraRuleFile_includes(tmp_path):
@@ -288,18 +323,21 @@ def test_YaraRuleFile_includes(tmp_path):
     # but it seems you have to specify the full path to the file
     #
 
-    target_path = tmp_path / 'target.yar'
-    target_path.write_text("""
+    target_path = tmp_path / "target.yar"
+    target_path.write_text(
+        """
 rule rule_2 {
     strings:
         $ = "hey"
     condition:
         all of them
 }
-""")
+"""
+    )
 
-    source_path = tmp_path / 'source.yar'
-    source_path.write_text(f"""
+    source_path = tmp_path / "source.yar"
+    source_path.write_text(
+        f"""
 include "{target_path}"
 rule rule_1 {{
     strings:
@@ -307,7 +345,8 @@ rule rule_1 {{
     condition:
         all of them
 }}
-""")
+"""
+    )
 
     yara_rule_file = YaraRuleFile(str(source_path))
     assert not yara_rule_file.is_error_state
@@ -315,18 +354,23 @@ rule rule_1 {{
     # only one yara rule is loaded from this even though there is an include for more
     assert len(yara_rule_file.yara_rules) == 1
 
-@pytest.mark.parametrize('file_path,result', [
-    (None, False),
-    ('', False),
-    ('test.yar', True),
-    ('test.yara', True),
-    ('TEST.YAR', True),
-    ('TEST.YARA', True),
-    ('test.txt', False)
-])
+
+@pytest.mark.parametrize(
+    "file_path,result",
+    [
+        (None, False),
+        ("", False),
+        ("test.yar", True),
+        ("test.yara", True),
+        ("TEST.YAR", True),
+        ("TEST.YARA", True),
+        ("test.txt", False),
+    ],
+)
 @pytest.mark.unit
 def test_is_yara_file(file_path, result):
     assert is_yara_file(file_path) == result
+
 
 @pytest.mark.unit
 def test_YaraRuleDirectory_new_empty(tmpdir):
@@ -334,6 +378,7 @@ def test_YaraRuleDirectory_new_empty(tmpdir):
     rule_dir = YaraRuleDirectory(dir_path)
     # should be initially empty
     assert not rule_dir.tracked_files
+
 
 @pytest.mark.unit
 def test_YaraRuleDirectory_new_single_rule(tmpdir):
@@ -344,6 +389,7 @@ def test_YaraRuleDirectory_new_single_rule(tmpdir):
     rule_dir = YaraRuleDirectory(dir_path)
     assert len(rule_dir.tracked_files) == 1
 
+
 @pytest.mark.unit
 def test_YaraRuleDirectory_new_multi_rules(tmpdir):
     dir_path = str(tmpdir.mkdir("rules"))
@@ -353,6 +399,7 @@ def test_YaraRuleDirectory_new_multi_rules(tmpdir):
 
     rule_dir = YaraRuleDirectory(dir_path)
     assert len(rule_dir.tracked_files) == 2
+
 
 @pytest.mark.unit
 def test_YaraRuleDirectory_remove_missing_files(tmp_path):
@@ -366,6 +413,7 @@ def test_YaraRuleDirectory_remove_missing_files(tmp_path):
     rule_dir.refresh()
     assert len(rule_dir.tracked_files) == 0
 
+
 @pytest.mark.unit
 def test_YaraRuleDirectory_update_new_file(tmpdir):
     dir_path = str(tmpdir.mkdir("rules"))
@@ -378,6 +426,7 @@ def test_YaraRuleDirectory_update_new_file(tmpdir):
 
     rule_dir.refresh()
     assert len(rule_dir.tracked_files) == 1
+
 
 @pytest.mark.unit
 def test_YaraRuleDirectory_update_existing_file(tmp_path):
@@ -407,6 +456,7 @@ def test_YaraRuleDirectory_update_existing_file(tmp_path):
     # and there should be a new YaraRule object
     assert not (yara_rule_file.yara_rules[0] is yara_rule)
 
+
 @pytest.mark.unit
 def test_get_current_repo_commit(tmp_path):
     rule_dir = tmp_path / "rules"
@@ -418,23 +468,24 @@ def test_get_current_repo_commit(tmp_path):
     assert get_current_repo_commit(str(rule_dir)) is None
 
     # is a repo but does not have a commit
-    subprocess.run(['git', '-C', str(rule_dir), 'init'], stdout=DEVNULL, stderr=DEVNULL, check=True)
+    subprocess.run(["git", "-C", str(rule_dir), "init"], stdout=DEVNULL, stderr=DEVNULL, check=True)
     assert get_current_repo_commit(str(rule_dir)) is None
 
     # has a commit
-    subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule.yar'], stdout=PIPE, stderr=PIPE)
-    subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "add", "test_rule.yar"], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "commit", "-m" "testing"], stdout=PIPE, stderr=PIPE)
     current_commit = get_current_repo_commit(str(rule_dir))
     assert current_commit
 
     rule_path = rule_dir / "test_rule_2.yar"
     rule_path.write_text(_generate_yara_rule("test_rule_2"))
-    subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule_2.yar'], stdout=PIPE, stderr=PIPE)
-    subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "add", "test_rule_2.yar"], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "commit", "-m" "testing"], stdout=PIPE, stderr=PIPE)
     next_commit = get_current_repo_commit(str(rule_dir))
     assert next_commit
 
     assert current_commit != next_commit
+
 
 @pytest.mark.unit
 def test_YaraRuleRepository_new(tmp_path):
@@ -443,12 +494,13 @@ def test_YaraRuleRepository_new(tmp_path):
     rule_path = rule_dir / "test_rule.yar"
     rule_path.write_text(_generate_yara_rule("test_rule"))
 
-    subprocess.run(['git', '-C', str(rule_dir), 'init'], stdout=PIPE, stderr=PIPE)
-    subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule.yar'], stdout=PIPE, stderr=PIPE)
-    subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "init"], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "add", "test_rule.yar"], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "commit", "-m" "testing"], stdout=PIPE, stderr=PIPE)
 
     yara_repo = YaraRuleRepository(str(rule_dir))
     assert len(yara_repo.tracked_files) == 1
+
 
 @pytest.mark.unit
 def test_YaraRuleRepository_rule_modified(tmp_path):
@@ -457,9 +509,9 @@ def test_YaraRuleRepository_rule_modified(tmp_path):
     rule_path = rule_dir / "test_rule.yar"
     rule_path.write_text(_generate_yara_rule("test_rule"))
 
-    subprocess.run(['git', '-C', str(rule_dir), 'init'], stdout=PIPE, stderr=PIPE)
-    subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule.yar'], stdout=PIPE, stderr=PIPE)
-    subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "init"], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "add", "test_rule.yar"], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "commit", "-m" "testing"], stdout=PIPE, stderr=PIPE)
 
     yara_repo = YaraRuleRepository(str(rule_dir))
     assert len(yara_repo.tracked_files) == 1
@@ -475,12 +527,13 @@ def test_YaraRuleRepository_rule_modified(tmp_path):
     assert yara_rule.is_valid
 
     # commit the changes
-    subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule.yar'], stdout=PIPE, stderr=PIPE)
-    subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "add", "test_rule.yar"], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "commit", "-m" "testing"], stdout=PIPE, stderr=PIPE)
     yara_repo.refresh()
 
     # now the rule should be invalid
     assert not yara_rule.is_valid
+
 
 @pytest.mark.unit
 def test_YaraRuleRepository_repo_broken(tmp_path):
@@ -489,9 +542,9 @@ def test_YaraRuleRepository_repo_broken(tmp_path):
     rule_path = rule_dir / "test_rule.yar"
     rule_path.write_text(_generate_yara_rule("test_rule"))
 
-    subprocess.run(['git', '-C', str(rule_dir), 'init'], stdout=PIPE, stderr=PIPE)
-    subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule.yar'], stdout=PIPE, stderr=PIPE)
-    subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "init"], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "add", "test_rule.yar"], stdout=PIPE, stderr=PIPE)
+    subprocess.run(["git", "-C", str(rule_dir), "commit", "-m" "testing"], stdout=PIPE, stderr=PIPE)
 
     yara_repo = YaraRuleRepository(str(rule_dir))
     assert len(yara_repo.tracked_files) == 1
@@ -510,7 +563,7 @@ def test_YaraRuleRepository_repo_broken(tmp_path):
     rule_path.write_text(_generate_yara_rule("rule_modified"))
 
     # break the repo
-    git_dir = rule_dir / '.git'
+    git_dir = rule_dir / ".git"
     shutil.rmtree(str(git_dir))
 
     yara_repo.refresh()
@@ -518,14 +571,18 @@ def test_YaraRuleRepository_repo_broken(tmp_path):
     # rule should still be valid because we can't check the commit
     assert yara_rule.is_valid
 
-@pytest.mark.parametrize('yara_rule_source,expected_result', [
-    # test single rule
-    ( _generate_yara_rule("test_rule"), "test_rule" ),
-    # test multiple rules
-    ( f'{_generate_yara_rule("test_rule_1")}\n{_generate_yara_rule("test_rule_2")}', "test_rule_1,test_rule_2" ),
-    # order does not matter
-    ( f'{_generate_yara_rule("test_rule_2")}\n{_generate_yara_rule("test_rule_1")}', "test_rule_1,test_rule_2" ),
-])
+
+@pytest.mark.parametrize(
+    "yara_rule_source,expected_result",
+    [
+        # test single rule
+        (_generate_yara_rule("test_rule"), "test_rule"),
+        # test multiple rules
+        (f'{_generate_yara_rule("test_rule_1")}\n{_generate_yara_rule("test_rule_2")}', "test_rule_1,test_rule_2"),
+        # order does not matter
+        (f'{_generate_yara_rule("test_rule_2")}\n{_generate_yara_rule("test_rule_1")}', "test_rule_1,test_rule_2"),
+    ],
+)
 @pytest.mark.unit
 def test_generate_context_key(yara_rule_source, expected_result, tmp_path):
     rule_file = tmp_path / "rule.yar"
@@ -534,9 +591,11 @@ def test_generate_context_key(yara_rule_source, expected_result, tmp_path):
 
     assert generate_context_key(yara_rule_file.yara_rules) == expected_result
 
+
 @pytest.mark.unit
 def test_generate_context_key_empty_list(tmp_path):
-    assert generate_context_key([]) == ''
+    assert generate_context_key([]) == ""
+
 
 @pytest.mark.unit
 def test_YaraContext_new(tmp_path):
@@ -548,6 +607,7 @@ def test_YaraContext_new(tmp_path):
     # the source won't be exactly the same
     assert len(yara_context.yara_rules) == 1
     assert len(yara_context.yara_rule_files) == 0
+
 
 @pytest.mark.unit
 def test_YaraContext_new_from_file(tmp_path):
@@ -561,6 +621,7 @@ def test_YaraContext_new_from_file(tmp_path):
     assert len(yara_context.yara_rules) == 0
     assert len(yara_context.yara_rule_files) == 1
 
+
 @pytest.mark.unit
 def test_YaraContext_yara_rule_modified(tmp_path):
     rule_file = tmp_path / "rule.yar"
@@ -572,6 +633,7 @@ def test_YaraContext_yara_rule_modified(tmp_path):
     yara_rule_file.update()
     # after the file changes the context is no longer valid
     assert not yara_context.is_valid
+
 
 @pytest.mark.unit
 def test_YaraContext_yara_rule_file_modified(tmp_path):
@@ -586,6 +648,7 @@ def test_YaraContext_yara_rule_file_modified(tmp_path):
     yara_rule_file.update()
     assert not yara_context.is_valid
 
+
 @pytest.mark.unit
 def test_YaraContext_yara_rule_file_missing(tmp_path):
     rule_file = tmp_path / "rule.yar"
@@ -599,6 +662,7 @@ def test_YaraContext_yara_rule_file_missing(tmp_path):
     yara_rule_file.update()
     assert not yara_context.is_valid
 
+
 @pytest.mark.unit
 def test_YaraScanner_new():
     scanner = YaraScanner()
@@ -607,6 +671,7 @@ def test_YaraScanner_new():
     assert not scanner.tracked_repos
     assert scanner.default_timeout == DEFAULT_TIMEOUT
     assert not scanner.yara_contexts
+
 
 @pytest.mark.unit
 def test_YaraScanner_track_yara_file(tmp_path):
@@ -622,6 +687,7 @@ def test_YaraScanner_track_yara_file(tmp_path):
     scanner.track_yara_file(str(rule_path))
     assert len(scanner.tracked_files) == 1
     assert len(scanner.all_yara_rule_files) == 1
+
 
 @pytest.mark.unit
 def test_YaraScanner_track_yara_dir(tmp_path):
@@ -648,12 +714,13 @@ def test_YaraScanner_track_yara_dir(tmp_path):
     assert len(scanner.tracked_dirs) == 1
     assert len(scanner.all_yara_rule_files) == 1
 
+
 @requires_git
 @pytest.mark.unit
 def test_YaraScanner_track_yara_repo(tmp_path):
     rule_dir = tmp_path / "rules"
     rule_dir.mkdir()
-    
+
     rule_path = rule_dir / "test_rule.yar"
     rule_path.write_text(_generate_yara_rule("test_rule"))
 
@@ -666,9 +733,9 @@ def test_YaraScanner_track_yara_repo(tmp_path):
     other_rule_path = not_a_repo / "other_rule.yar"
     other_rule_path.write_text(_generate_yara_rule("other_rule"))
 
-    result = subprocess.run(['git', '-C', str(rule_dir), 'init'], stdout=PIPE, stderr=PIPE)
-    result = subprocess.run(['git', '-C', str(rule_dir), 'add', 'test_rule.yar'], stdout=PIPE, stderr=PIPE)
-    result = subprocess.run(['git', '-C', str(rule_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(["git", "-C", str(rule_dir), "init"], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(["git", "-C", str(rule_dir), "add", "test_rule.yar"], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(["git", "-C", str(rule_dir), "commit", "-m" "testing"], stdout=PIPE, stderr=PIPE)
 
     scanner = YaraScanner()
     scanner.track_yara_repository(str(rule_dir))
@@ -690,40 +757,44 @@ def test_YaraScanner_track_yara_repo(tmp_path):
     assert len(scanner.tracked_repos) == 1
     assert len(scanner.all_yara_rule_files) == 1
 
+
 @pytest.mark.unit
 def test_YaraScanner_load_signature_directory(shared_datadir):
-    scanner = YaraScanner(signature_dir=str(shared_datadir / 'signatures'))
+    scanner = YaraScanner(signature_dir=str(shared_datadir / "signatures"))
     assert len(scanner.tracked_dirs) == 2
     assert len(scanner.all_yara_rule_files) == 2
     # each directory has one file
     for dir_path, yara_dir in scanner.tracked_dirs.items():
         assert len(yara_dir.tracked_files) == 1
 
+
 @pytest.mark.unit
 def test_YaraScanner_load_signature_directory_non_directory(tmp_path):
-    signature_dir = tmp_path / 'signatures'
+    signature_dir = tmp_path / "signatures"
     signature_dir.mkdir()
-    non_dir_path = signature_dir / 'test'
+    non_dir_path = signature_dir / "test"
     non_dir_path.write_text("test")
     scanner = YaraScanner(signature_dir=str(signature_dir))
     assert len(scanner.tracked_dirs) == 0
 
+
 @pytest.mark.unit
 def test_YaraScanner_load_signature_directory_git_repo(tmp_path):
-    signature_dir = tmp_path / 'signatures'
+    signature_dir = tmp_path / "signatures"
     signature_dir.mkdir()
-    repo_dir = signature_dir / 'test'
+    repo_dir = signature_dir / "test"
     repo_dir.mkdir()
     repo_rule_path = repo_dir / "repo_rule.yar"
     repo_rule_path.write_text(_generate_yara_rule("repo_rule"))
 
-    result = subprocess.run(['git', '-C', str(repo_dir), 'init'], stdout=PIPE, stderr=PIPE)
-    result = subprocess.run(['git', '-C', str(repo_dir), 'add', 'repo_rule.yar'], stdout=PIPE, stderr=PIPE)
-    result = subprocess.run(['git', '-C', str(repo_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(["git", "-C", str(repo_dir), "init"], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(["git", "-C", str(repo_dir), "add", "repo_rule.yar"], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(["git", "-C", str(repo_dir), "commit", "-m" "testing"], stdout=PIPE, stderr=PIPE)
 
     scanner = YaraScanner(signature_dir=str(signature_dir))
     assert len(scanner.tracked_dirs) == 0
     assert len(scanner.tracked_repos) == 1
+
 
 @pytest.mark.unit
 def test_YaraScanner_get_unparsed_yara_rule_files(tmp_path):
@@ -739,6 +810,7 @@ def test_YaraScanner_get_unparsed_yara_rule_files(tmp_path):
     scanner = YaraScanner()
     scanner.track_yara_file(str(rule_file), disable_plyara=True)
     assert scanner.get_unparsed_yara_rule_files()
+
 
 @pytest.mark.unit
 def test_YaraScanner_check_rules(tmp_path):
@@ -758,9 +830,9 @@ def test_YaraScanner_check_rules(tmp_path):
     repo_rule_path = repo_dir / "repo_rule.yar"
     repo_rule_path.write_text(_generate_yara_rule("repo_rule"))
 
-    result = subprocess.run(['git', '-C', str(repo_dir), 'init'], stdout=PIPE, stderr=PIPE)
-    result = subprocess.run(['git', '-C', str(repo_dir), 'add', 'repo_rule.yar'], stdout=PIPE, stderr=PIPE)
-    result = subprocess.run(['git', '-C', str(repo_dir), 'commit', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(["git", "-C", str(repo_dir), "init"], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(["git", "-C", str(repo_dir), "add", "repo_rule.yar"], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(["git", "-C", str(repo_dir), "commit", "-m" "testing"], stdout=PIPE, stderr=PIPE)
 
     scanner = YaraScanner()
     scanner.track_yara_file(str(single_rule_path))
@@ -780,7 +852,7 @@ def test_YaraScanner_check_rules(tmp_path):
     single_rule_path.write_text(_generate_yara_rule("updated_single_rule"))
     dir_rule_path.write_text(_generate_yara_rule("updated_dir_rule"))
     repo_rule_path.write_text(_generate_yara_rule("updated_repo_rule"))
-    result = subprocess.run(['git', '-C', str(repo_dir), 'commit', '-a', '-m' 'testing'], stdout=PIPE, stderr=PIPE)
+    result = subprocess.run(["git", "-C", str(repo_dir), "commit", "-a", "-m" "testing"], stdout=PIPE, stderr=PIPE)
 
     scanner.check_rules()
 
@@ -789,6 +861,7 @@ def test_YaraScanner_check_rules(tmp_path):
 
     yara_rules = [_.yara_rules[0] for _ in scanner.all_yara_rule_files]
     assert len(yara_rules) == 3
+
 
 @pytest.mark.unit
 def test_YaraScanner_get_yara_context(tmp_path):
@@ -815,6 +888,7 @@ def test_YaraScanner_get_yara_context(tmp_path):
     # we should have a different context now
     assert not (scanner.get_yara_context(str(scan_target)) is context)
 
+
 @pytest.mark.unit
 def test_YaraScanner_get_yara_context_empty(tmp_path):
     scanner = YaraScanner()
@@ -824,6 +898,7 @@ def test_YaraScanner_get_yara_context_empty(tmp_path):
     assert context is not None
     assert context.context is not None
     assert not context.sources
+
 
 @pytest.mark.unit
 def test_YaraScanner_get_yara_context_invalid_syntax_fixed(tmp_path):
@@ -852,7 +927,8 @@ def test_YaraScanner_get_yara_context_invalid_syntax_fixed(tmp_path):
     # and should have rules loaded
     assert good_context.sources
 
-@pytest.mark.parametrize('timeout', [ None, 0 ])
+
+@pytest.mark.parametrize("timeout", [None, 0])
 @pytest.mark.unit
 def test_YaraScanner_scan(timeout, tmp_path):
     rule_path = tmp_path / "test_rule.yar"
@@ -860,13 +936,14 @@ def test_YaraScanner_scan(timeout, tmp_path):
 
     scan_target = tmp_path / "target.txt"
     scan_target.write_text("hello world")
-    
+
     scanner = YaraScanner()
     scanner.track_yara_file(str(rule_path))
 
     assert scanner.scan(str(scan_target), timeout=timeout)
 
-@pytest.mark.parametrize('timeout', [ None, 0 ])
+
+@pytest.mark.parametrize("timeout", [None, 0])
 @pytest.mark.unit
 def test_YaraScanner_scan_data(timeout, tmp_path):
     rule_path = tmp_path / "test_rule.yar"
@@ -876,16 +953,18 @@ def test_YaraScanner_scan_data(timeout, tmp_path):
     scanner.track_yara_file(str(rule_path))
 
     # this should match
-    assert scanner.scan_data('hello world', timeout=timeout)
+    assert scanner.scan_data("hello world", timeout=timeout)
     # this should also match
-    assert scanner.scan_data(b'hello world', timeout=timeout)
+    assert scanner.scan_data(b"hello world", timeout=timeout)
     # this should not match
-    assert not scanner.scan_data('random data', timeout=timeout)
+    assert not scanner.scan_data("random data", timeout=timeout)
+
 
 @pytest.mark.integration
 def test_YaraScanner_filtering(tmp_path):
-    bas_rule_path = tmp_path / 'bas_rule.yar'
-    bas_rule_path.write_text("""
+    bas_rule_path = tmp_path / "bas_rule.yar"
+    bas_rule_path.write_text(
+        """
 rule bas_rule {
     meta:
         file_ext = "bas"
@@ -894,10 +973,12 @@ rule bas_rule {
     condition:
         any of them
 }
-""")
+"""
+    )
 
-    exe_rule_path = tmp_path / 'exe_rule.yar'
-    exe_rule_path.write_text("""
+    exe_rule_path = tmp_path / "exe_rule.yar"
+    exe_rule_path.write_text(
+        """
 rule exe_rule {
     meta:
         file_ext = "exe"
@@ -906,7 +987,8 @@ rule exe_rule {
     condition:
         any of them
 }
-""")
+"""
+    )
 
     scanner = YaraScanner(disable_postfiltering=True)
     scanner.track_yara_file(str(bas_rule_path))
@@ -917,7 +999,7 @@ rule exe_rule {
     # and these two should be the same
     assert scanner.get_yara_context("sample.bas") is scanner.get_yara_context("file.bas")
 
-    target_file = tmp_path / 'target.exe'
+    target_file = tmp_path / "target.exe"
     target_file.write_text("test_1")
 
     # even though test_1 matches bas_rule, we don't get a match because of the prefiltering
@@ -945,6 +1027,7 @@ rule exe_rule {
     # but this matches because there is no filtering
     assert scanner.scan(str(target_file))
 
+
 @pytest.mark.unit
 def test_YaraScanner_json_match(tmp_path):
     rule_path = tmp_path / "test_rule.yar"
@@ -970,37 +1053,40 @@ def test_YaraScanner_json_match(tmp_path):
 
 @pytest.mark.integration
 def test_YaraScanner_scan_results(scanner):
-    scanner.scan_data('test_rule_1')
+    scanner.scan_data("test_rule_1")
     # this should match tests/data/signatures/ruleset_a/rule_1.yar
     assert len(scanner.scan_results) == 1
     for key in ALL_RESULT_KEYS:
         assert key in scanner.scan_results[0]
 
-    assert scanner.scan_results[0][RESULT_KEY_TARGET] == ''
+    assert scanner.scan_results[0][RESULT_KEY_TARGET] == ""
     assert scanner.scan_results[0][RESULT_KEY_META] == {}
-    assert os.path.basename(scanner.scan_results[0][RESULT_KEY_NAMESPACE]) == 'ruleset_a'
-    assert scanner.scan_results[0][RESULT_KEY_RULE] == 'rule_1'
-    assert scanner.scan_results[0][RESULT_KEY_STRINGS] == [(0, '$', b'test_rule_1')]
-    assert scanner.scan_results[0][RESULT_KEY_TAGS] == ['tag_1']
+    assert os.path.basename(scanner.scan_results[0][RESULT_KEY_NAMESPACE]) == "ruleset_a"
+    assert scanner.scan_results[0][RESULT_KEY_RULE] == "rule_1"
+    assert scanner.scan_results[0][RESULT_KEY_STRINGS] == [(0, "$", b"test_rule_1")]
+    assert scanner.scan_results[0][RESULT_KEY_TAGS] == ["tag_1"]
 
-    scanner.scan_data('test_rule_1\ntest_rule_2\n')
+    scanner.scan_data("test_rule_1\ntest_rule_2\n")
     # this should match both rules
     assert len(scanner.scan_results) == 2
 
+
 @pytest.mark.integration
 def test_YaraScanner_file_scan_results(scanner, shared_datadir):
-    assert scanner.scan(str(shared_datadir / 'scan_targets' / 'scan_target_1.txt'))
+    assert scanner.scan(str(shared_datadir / "scan_targets" / "scan_target_1.txt"))
 
-    assert os.path.basename(scanner.scan_results[0][RESULT_KEY_TARGET]) == 'scan_target_1.txt'
+    assert os.path.basename(scanner.scan_results[0][RESULT_KEY_TARGET]) == "scan_target_1.txt"
     assert scanner.scan_results[0][RESULT_KEY_META] == {}
-    assert os.path.basename(scanner.scan_results[0][RESULT_KEY_NAMESPACE]) == 'ruleset_a'
-    assert scanner.scan_results[0][RESULT_KEY_RULE] == 'rule_1'
-    assert scanner.scan_results[0][RESULT_KEY_STRINGS] == [(0, '$', b'test_rule_1')]
-    assert scanner.scan_results[0][RESULT_KEY_TAGS] == ['tag_1']
+    assert os.path.basename(scanner.scan_results[0][RESULT_KEY_NAMESPACE]) == "ruleset_a"
+    assert scanner.scan_results[0][RESULT_KEY_RULE] == "rule_1"
+    assert scanner.scan_results[0][RESULT_KEY_STRINGS] == [(0, "$", b"test_rule_1")]
+    assert scanner.scan_results[0][RESULT_KEY_TAGS] == ["tag_1"]
 
-#region meta_rule_tests
+
+# region meta_rule_tests
 meta_rule_tests = [
-    ("""
+    (
+        """
 rule test_meta_filename {
 meta:
     file_name = "scan_target_1.txt"
@@ -1009,11 +1095,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'scan_target_1.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "scan_target_1.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_filename_multi {
 meta:
     file_name = "scan_target_1.txt,scan_target_2.txt"
@@ -1022,11 +1110,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'scan_target_1.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "scan_target_1.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_filename_not {
 meta:
     file_name = "!scan_target_1.txt"
@@ -1035,11 +1125,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'scan_target_1.txt', 
-    'Sample content.',
-    False),
-    ("""
+    """,
+        "scan_target_1.txt",
+        "Sample content.",
+        False,
+    ),
+    (
+        """
 rule test_meta_filename_not_multi {
 meta:
     file_name = "!scan_target_1.txt,scan_target_2.txt"
@@ -1048,11 +1140,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'scan_target_2.txt', 
-    'Sample content.',
-    False),
-    ("""
+    """,
+        "scan_target_2.txt",
+        "Sample content.",
+        False,
+    ),
+    (
+        """
 rule test_meta_filename_not_multi {
 meta:
     file_name = "!scan_target_1.txt,scan_target_2.txt"
@@ -1061,11 +1155,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'scan_target_3.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "scan_target_3.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_filename_sub {
 meta:
     file_name = "sub:scan_target_1."
@@ -1074,11 +1170,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'scan_target_1.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "scan_target_1.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_filename_re {
 meta:
     file_name = "re:^scan_target_1"
@@ -1087,11 +1185,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'scan_target_1.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "scan_target_1.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_filename_re {
 meta:
     file_name = "re:^scan_target_1"
@@ -1100,11 +1200,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'scan_target_2.txt', 
-    'Sample content.',
-    False),
-    ("""
+    """,
+        "scan_target_2.txt",
+        "Sample content.",
+        False,
+    ),
+    (
+        """
 rule test_meta_filename_re {
 meta:
     file_name = "!re:^scan_target_1"
@@ -1113,11 +1215,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'scan_target_2.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "scan_target_2.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_filepath_sub {
 meta:
     full_path = "sub:data/scan_target_1.txt"
@@ -1126,11 +1230,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_1.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "data/scan_target_1.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_filepath_sub_multi {
 meta:
     full_path = "sub:data/scan_target_1.txt,data/scan_target_2.txt"
@@ -1139,11 +1245,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_2.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "data/scan_target_2.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_filepath_re {
 meta:
     full_path = "re:data/scan_target_[0-9]+.txt"
@@ -1152,11 +1260,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_1.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "data/scan_target_1.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_fileext {
 meta:
     file_ext = "txt"
@@ -1165,11 +1275,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_1.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "data/scan_target_1.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_fileext_multi {
 meta:
     file_ext = "txt,pdf,doc"
@@ -1178,11 +1290,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_1.doc', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "data/scan_target_1.doc",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_mime {
 meta:
     mime_type = "text/plain"
@@ -1191,11 +1305,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_1.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "data/scan_target_1.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_mime_multi {
 meta:
     mime_type = "text/plain,text/html"
@@ -1204,11 +1320,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_1.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "data/scan_target_1.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_mime {
 meta:
     mime_type = "re:^text/.+"
@@ -1217,11 +1335,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_1.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "data/scan_target_1.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_multi_meta {
 meta:
     file_name = "scan_target_1.txt"
@@ -1231,11 +1351,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_1.txt', 
-    'Sample content.',
-    True),
-    ("""
+    """,
+        "data/scan_target_1.txt",
+        "Sample content.",
+        True,
+    ),
+    (
+        """
 rule test_meta_multi_meta {
 meta:
     file_name = "scan_target_1.txt"
@@ -1245,11 +1367,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_2.txt', 
-    'Sample content.',
-    False),
-    ("""
+    """,
+        "data/scan_target_2.txt",
+        "Sample content.",
+        False,
+    ),
+    (
+        """
 rule test_meta_multi_meta {
 meta:
     file_name = "!scan_target_1.txt"
@@ -1259,11 +1383,13 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_1.txt', 
-    'Sample content.',
-    False),
-    ("""
+    """,
+        "data/scan_target_1.txt",
+        "Sample content.",
+        False,
+    ),
+    (
+        """
 rule test_meta_multi_meta {
 meta:
     file_name = "!scan_target_1.txt"
@@ -1273,18 +1399,20 @@ strings:
 condition:
     all of them
 }
-    """, 
-    'data/scan_target_2.txt', 
-    'Sample content.',
-    True),
+    """,
+        "data/scan_target_2.txt",
+        "Sample content.",
+        True,
+    ),
 ]
-#endregion
+# endregion
+
 
 @pytest.mark.integration
 @pytest.mark.parametrize("yara_rule_content, scan_target_name, scan_target_content, expected", meta_rule_tests)
 def test_YaraScanner_meta_directives(tmp_path, yara_rule_content, scan_target_name, scan_target_content, expected):
     scanner = YaraScanner()
-    yara_rule_path = create_file(str(tmp_path / 'rule.yar'), yara_rule_content)
+    yara_rule_path = create_file(str(tmp_path / "rule.yar"), yara_rule_content)
     scan_target_path = create_file(str(tmp_path / scan_target_name), scan_target_content)
     scanner.track_yara_file(yara_rule_path)
 
@@ -1295,12 +1423,14 @@ def test_YaraScanner_meta_directives(tmp_path, yara_rule_content, scan_target_na
         assert not scanner.scan(scan_target_path)
         assert len(scanner.scan_results) == 0
 
+
 @pytest.mark.unit
 def test_YaraScanner_test_no_rules(tmp_path, capsys):
     scanner = YaraScanner()
     config = TestConfig()
     config.test = True
     assert not scanner.test_rules(config)
+
 
 TEST_RULE_1 = """
 rule test_rule_1 {
@@ -1336,23 +1466,51 @@ rule test_rule_regex {
 }
 """
 
-@pytest.mark.parametrize('test_config, test_rules, test_data, create_csv, expected_result', [
-    (None, [], None, False, False), # no config
-    (TestConfig(test=False), [], None, False, False), # do not run test
-    (TestConfig(test=True), [], None, False, False), # no rules
-    (TestConfig(test=True), [TEST_RULE_1], None, False, True), # single rule
-    (TestConfig(test=True), [TEST_RULE_1], "test", False, True), # single rule with test data
-    #(TestConfig(test=True, show_progress_bar=True), [TEST_RULE_1], None, False, True), # with the progress bar
-    (TestConfig(test=True, test_rule="test_rule_1"), [TEST_RULE_1, TEST_RULE_2], None, False, True), # specify a specific rule
-    (TestConfig(test=True, test_rule="unknown_rule"), [TEST_RULE_1], None, False, False), # specify an unknown rule for testing 
-    (TestConfig(test=True), [YARA_RULE_DEPENDENCY], None, False, True), # dependencies
-    (TestConfig(test=True), ["rule {"], None, False, True), # invalid syntax
-    (TestConfig(test=True, test_strings=True), [TEST_RULE_1], None, False, True), # test strings
-    (TestConfig(test=True, test_strings=True), [TEST_RULE_REGEX], None, True, True), # test strings with csv output
-    (TestConfig(test=True, test_strings=True, test_strings_if=True, test_strings_threshold=0.0), [TEST_RULE_1], None, False, True), # test strings if
-    (TestConfig(test=True, test_strings=True), [TEST_RULE_NO_STRINGS], None, False, True), # test strings with no strings
-    (TestConfig(test=True, test_strings=True), [TEST_RULE_REGEX], None, False, True), # test regex strings
-])
+
+@pytest.mark.parametrize(
+    "test_config, test_rules, test_data, create_csv, expected_result",
+    [
+        (None, [], None, False, False),  # no config
+        (TestConfig(test=False), [], None, False, False),  # do not run test
+        (TestConfig(test=True), [], None, False, False),  # no rules
+        (TestConfig(test=True), [TEST_RULE_1], None, False, True),  # single rule
+        (TestConfig(test=True), [TEST_RULE_1], "test", False, True),  # single rule with test data
+        # (TestConfig(test=True, show_progress_bar=True), [TEST_RULE_1], None, False, True), # with the progress bar
+        (
+            TestConfig(test=True, test_rule="test_rule_1"),
+            [TEST_RULE_1, TEST_RULE_2],
+            None,
+            False,
+            True,
+        ),  # specify a specific rule
+        (
+            TestConfig(test=True, test_rule="unknown_rule"),
+            [TEST_RULE_1],
+            None,
+            False,
+            False,
+        ),  # specify an unknown rule for testing
+        (TestConfig(test=True), [YARA_RULE_DEPENDENCY], None, False, True),  # dependencies
+        (TestConfig(test=True), ["rule {"], None, False, True),  # invalid syntax
+        (TestConfig(test=True, test_strings=True), [TEST_RULE_1], None, False, True),  # test strings
+        (TestConfig(test=True, test_strings=True), [TEST_RULE_REGEX], None, True, True),  # test strings with csv output
+        (
+            TestConfig(test=True, test_strings=True, test_strings_if=True, test_strings_threshold=0.0),
+            [TEST_RULE_1],
+            None,
+            False,
+            True,
+        ),  # test strings if
+        (
+            TestConfig(test=True, test_strings=True),
+            [TEST_RULE_NO_STRINGS],
+            None,
+            False,
+            True,
+        ),  # test strings with no strings
+        (TestConfig(test=True, test_strings=True), [TEST_RULE_REGEX], None, False, True),  # test regex strings
+    ],
+)
 @pytest.mark.integration
 def test_YaraScanner_test_rules(test_config, test_rules, test_data, create_csv, expected_result, tmp_path, capsys):
     test_data_path = None

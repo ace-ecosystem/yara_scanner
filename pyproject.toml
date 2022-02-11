@@ -52,6 +52,9 @@ ysc = "ysc:main"
 # yara scanner server
 yss = "yss:main"
 
+[tool.black]
+line-length = 120
+
 [build-system]
 requires = ["poetry>=0.12"]
 build-backend = "poetry.masonry.api"

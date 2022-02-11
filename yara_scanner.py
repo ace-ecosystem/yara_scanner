@@ -66,6 +66,7 @@ import yara
 # DEPRECATED
 class RulesNotLoadedError(Exception):
     """Raised when a call is made to scan before any rules have been loaded."""
+
     pass
 
 
@@ -95,7 +96,7 @@ DEFAULT_YARA_EXTERNALS = {
 
 # the default namespace to use if one is not specified
 # yara python library does not like using an empty string for this
-DEFAULT_NAMESPACE = 'DEFAULT'
+DEFAULT_NAMESPACE = "DEFAULT"
 
 # the default timeout for scanning (in seconds)
 DEFAULT_TIMEOUT = 5
@@ -118,26 +119,29 @@ log = logging.getLogger("yara-scanner")
 
 def generate_context_key(rules: list[YaraRule]):
     """Return the key to use for a give list of yara rules."""
-    return ','.join(sorted([_.parsed_rule['rule_name'] for _ in rules]))
+    return ",".join(sorted([_.parsed_rule["rule_name"] for _ in rules]))
+
 
 def is_yara_file(file_path: str) -> bool:
     """Returns True if the given file name or path looks like it might be a yara file."""
     if not file_path:
         return False
 
-    if file_path.lower().endswith('.yar'):
+    if file_path.lower().endswith(".yar"):
         return True
 
-    if file_path.lower().endswith('.yara'):
+    if file_path.lower().endswith(".yara"):
         return True
 
     return False
+
 
 def get_mime_type(file_path: str) -> str:
     """Returns the mime type of the given file as returned by the file command."""
     p = Popen(["file", "-b", "--mime-type", file_path], stdout=PIPE, stderr=PIPE, text=True)
     mime_type, _ = p.communicate()
     return mime_type.strip()
+
 
 def extract_filters_from_metadata(metadata: list[dict]) -> dict[str, str]:
     """Extract the meta directives for filtering.
@@ -152,8 +156,9 @@ def extract_filters_from_metadata(metadata: list[dict]) -> dict[str, str]:
 
     return result
 
+
 class Filterable:
-    def filter_check(self, filters: dict[str, str], file_path: str, mime_type: str=None) -> bool:
+    def filter_check(self, filters: dict[str, str], file_path: str, mime_type: str = None) -> bool:
         for directive, value in filters.items():
             # you can invert the logic by starting the value with !
             inverted = False
@@ -195,7 +200,7 @@ class Filterable:
                 log.error(f"not a valid meta directive {directive}")
                 continue
 
-            #log.debug("compare target is {} for directive {}".format(compare_target, directive))
+            # log.debug("compare target is {} for directive {}".format(compare_target, directive))
 
             # figure out how to compare what is supplied by the user to the search target
             if use_regex:
@@ -211,22 +216,24 @@ class Filterable:
                 # log.debug("search item {} vs compare target {} matches {}".format(search_item, compare_target, matches))
 
             if (inverted and matches) or (not inverted and not matches):
-                #log.debug(
-                    #"skipping yara rule {} for file {} directive {} list {} negated {} regex {} subsearch {}".format(
-                        #match_result.rule, file_path, directive, value, inverted, use_regex, use_substring
-                    #)
-                #)
+                # log.debug(
+                # "skipping yara rule {} for file {} directive {} list {} negated {} regex {} subsearch {}".format(
+                # match_result.rule, file_path, directive, value, inverted, use_regex, use_substring
+                # )
+                # )
                 return False
 
         return True
 
+
 class YaraRuleDirectory:
     """A directory that contains yara rule files."""
+
     def __init__(self, dir_path: str):
         # the path to the directory that contains the yara rules
         self.dir_path = dir_path
         # map file path to yara rule file
-        self.tracked_files = {} # key = path, value = YaraRuleFile
+        self.tracked_files = {}  # key = path, value = YaraRuleFile
         self.refresh()
 
     @property
@@ -268,29 +275,30 @@ class YaraRuleDirectory:
         for removed_file in removed_files:
             del self.tracked_files[removed_file]
 
+
 def get_current_repo_commit(dir_path: str) -> str:
     """Utility function to return the current commit hash for a given repo directory.  Returns None on failure."""
-    p = Popen(
-        ["git", "-C", dir_path, "log", "-n", "1", "--format=oneline"], stdout=PIPE, stderr=PIPE, text=True
-    )
+    p = Popen(["git", "-C", dir_path, "log", "-n", "1", "--format=oneline"], stdout=PIPE, stderr=PIPE, text=True)
     commit, stderr = p.communicate()
 
     if len(stderr.strip()) > 0:
         log.error(f"git reported an error on repo {dir_path}: {stderr.strip()}")
         return None
 
-    if p.returncode != 0: # pragma: no cover
+    if p.returncode != 0:  # pragma: no cover
         log.error(f"git returned a non-zero exit status on repo {dir_path}")
         return None
 
-    if len(commit) < 40: # pragma: no cover
+    if len(commit) < 40:  # pragma: no cover
         log.error(f"got {commit.strip()} for stdout with git log on repo {dir_path}")
         return None
 
     return commit[0:40]
 
+
 class YaraRuleRepository(YaraRuleDirectory):
     """A git repository that contains yara rules."""
+
     def __init__(self, *args, **kwargs):
         # keep track of what the last commit was
         self.last_repo_commit = None
@@ -303,16 +311,19 @@ class YaraRuleRepository(YaraRuleDirectory):
             return
 
         if current_repo_commit != self.last_repo_commit:
-            log.info(f"detected change in git repo {self.dir_path} "
-                      f"from {self.last_repo_commit} to {current_repo_commit}")
+            log.info(
+                f"detected change in git repo {self.dir_path} " f"from {self.last_repo_commit} to {current_repo_commit}"
+            )
 
             # works the same as a YaraRuleDirectory
             YaraRuleDirectory.refresh(self)
             self.last_repo_commit = current_repo_commit
 
+
 class YaraRuleFile:
     """A file that contains one or more yara rules."""
-    def __init__(self, file_path: str, namespace: str=None, disable_plyara: bool=False):
+
+    def __init__(self, file_path: str, namespace: str = None, disable_plyara: bool = False):
         # the path to the yara rule
         self.file_path = file_path
         # the contents of the yara file loaded into memory
@@ -362,7 +373,7 @@ class YaraRuleFile:
             if not os.path.exists(self.file_path):
                 self.is_deleted = True
                 return True
-            else: # pragma: no cover
+            else:  # pragma: no cover
                 # this would be something like file system failure
                 log.error(f"error accessing {self.file_path}: {e}")
                 return False
@@ -396,7 +407,7 @@ class YaraRuleFile:
 
         # compute the sha256 of the yara rule contents
         hasher = hashlib.sha256()
-        hasher.update(self.source.encode(errors='ignore'))
+        hasher.update(self.source.encode(errors="ignore"))
         self.source_sha256 = hasher.hexdigest()
 
         try:
@@ -440,9 +451,11 @@ class YaraRuleFile:
 
         return True
 
+
 class YaraRule(Filterable):
     """A single yara rule parsed out with plyara."""
-    def __init__(self, parsed_rule: dict, *args, namespace: str=None, **kwargs):
+
+    def __init__(self, parsed_rule: dict, *args, namespace: str = None, **kwargs):
         super().__init__()
 
         # the parsed rule as returned by plyara
@@ -452,16 +465,16 @@ class YaraRule(Filterable):
 
         # the list of meta filters for this yara rule
         self.filters = {}
-        if 'metadata' in self.parsed_rule:
-            self.filters = extract_filters_from_metadata(self.parsed_rule['metadata'])
+        if "metadata" in self.parsed_rule:
+            self.filters = extract_filters_from_metadata(self.parsed_rule["metadata"])
 
         # as long as this is set to True this rule can be used for scanning
         self.valid = True
 
     def __str__(self):
-        return (f"YaraRule(name: {self.parsed_rule['rule_name']}, "
-                f"namespace: {self.namespace}, "
-                f"valid: {self.valid})")
+        return (
+            f"YaraRule(name: {self.parsed_rule['rule_name']}, " f"namespace: {self.namespace}, " f"valid: {self.valid})"
+        )
 
     def invalidate(self):
         self.valid = False
@@ -472,9 +485,11 @@ class YaraRule(Filterable):
         A rule becomes invalid if the source is modified in any way."""
         return self.valid
 
+
 class YaraContext:
     """A compiled set of one or more yara rules or yara rule files."""
-    def __init__(self, yara_rules: list[YaraRule]=None, yara_rule_files: list[YaraRuleFile]=None):
+
+    def __init__(self, yara_rules: list[YaraRule] = None, yara_rule_files: list[YaraRuleFile] = None):
         if yara_rules is None:
             yara_rules = []
 
@@ -495,10 +510,10 @@ class YaraContext:
         # remember hash of the content so we know when it changes
         # so we know when something changed
         # maps file path to sha256
-        self.yara_rule_file_sha256 = { _.file_path: _.source_sha256 for _ in self.yara_rule_files }
+        self.yara_rule_file_sha256 = {_.file_path: _.source_sha256 for _ in self.yara_rule_files}
 
         # generate the source for this yara rule context
-        self.sources = {} # key = namespace, value = [] of rules
+        self.sources = {}  # key = namespace, value = [] of rules
         yara_rule_count = 0
         for yara_rule in self.yara_rules:
             if yara_rule.namespace not in self.sources:
@@ -521,7 +536,7 @@ class YaraContext:
             log.warning("creating empty yara context")
 
         # for each namespace join the individual sources together with newlines
-        self.sources = { namespace: '\n\n'.join(sources) for namespace, sources in self.sources.items() }
+        self.sources = {namespace: "\n\n".join(sources) for namespace, sources in self.sources.items()}
 
         # the yara context
         self.context = yara.compile(sources=self.sources)
@@ -545,13 +560,14 @@ class YaraContext:
 
         return True
 
+
 class YaraJSONEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, bytes):
             return o.decode("utf-8", errors="backslashreplace")
 
         # scan results are either string or bytes
-        return json.JSONEncoder.default(self, o) # pragma: no cover
+        return json.JSONEncoder.default(self, o)  # pragma: no cover
 
 
 class YaraScanner(Filterable):
@@ -582,19 +598,19 @@ class YaraScanner(Filterable):
         """
         super().__init__()
 
-        self.mime_type = None # the last mime type we recorded on a scan of a file
+        self.mime_type = None  # the last mime type we recorded on a scan of a file
         self._scan_results = []
 
         # we keep track of when the rules change and (optionally) automatically re-load the rules
-        self.tracked_files = {} # maps path to YaraRuleFile
-        self.tracked_dirs = {} # maps path to YaraRuleDirectory
-        self.tracked_repos = {} # maps path to YaraRuleRepository
+        self.tracked_files = {}  # maps path to YaraRuleFile
+        self.tracked_dirs = {}  # maps path to YaraRuleDirectory
+        self.tracked_repos = {}  # maps path to YaraRuleRepository
 
         # the default amount of time (in seconds) a yara scan is allowed to take before it fails
         self.default_timeout = default_timeout
 
         # the dictionary of yara contexts to use for given rulesets
-        self.yara_contexts = {} # key = generate_context_key(), value = compiled yara context
+        self.yara_contexts = {}  # key = generate_context_key(), value = compiled yara context
 
         # if this is set then we disable prefiltering
         self.disable_prefilter = disable_prefilter
@@ -635,9 +651,13 @@ class YaraScanner(Filterable):
 
     def get_unparsed_yara_rule_files(self) -> list[YaraRuleFile]:
         """Returns the list of YaraRuleFile objects that were not parsed with plyara and not in an error state."""
-        return [_ for _ in self.all_yara_rule_files if not _.is_error_state and (_.is_plyara_incompatible or _.disable_plyara)]
+        return [
+            _
+            for _ in self.all_yara_rule_files
+            if not _.is_error_state and (_.is_plyara_incompatible or _.disable_plyara)
+        ]
 
-    def get_yara_context(self, file_path: str=None, mime_type: str=None) -> YaraContext:
+    def get_yara_context(self, file_path: str = None, mime_type: str = None) -> YaraContext:
         """Returns the yara context to use for the given file.
         If a file is not specified, the default context is returned which contains all available rules."""
         # figure out which rules match which filters for teh given file
@@ -659,15 +679,17 @@ class YaraScanner(Filterable):
             # do we already have this compiled?
             yara_context = self.yara_contexts[yara_context_key]
         except KeyError:
-            yara_context = YaraContext(yara_rules=filtered_yara_rules, 
-                    yara_rule_files=self.get_unparsed_yara_rule_files())
+            yara_context = YaraContext(
+                yara_rules=filtered_yara_rules, yara_rule_files=self.get_unparsed_yara_rule_files()
+            )
             self.yara_contexts[yara_context_key] = yara_context
 
         # is this yara context still valid?
         if not yara_context.is_valid:
             # if not then recreate it
-            yara_context = YaraContext(yara_rules=filtered_yara_rules, 
-                    yara_rule_files=self.get_unparsed_yara_rule_files())
+            yara_context = YaraContext(
+                yara_rules=filtered_yara_rules, yara_rule_files=self.get_unparsed_yara_rule_files()
+            )
             self.yara_contexts[yara_context_key] = yara_context
 
         return yara_context
@@ -678,7 +700,7 @@ class YaraScanner(Filterable):
 
         This function returns a list of dict with the following format ::
 
-        
+
                 'target': str,
                 'meta': dict,
                 'namespace': str,
@@ -729,7 +751,7 @@ class YaraScanner(Filterable):
         log.debug(f"tracking yara file {file_path}")
 
     def track_yara_dir(self, dir_path, *args, **kwargs):
-        """Adds all files in a given directory that end with .yar when converted to lowercase.  
+        """Adds all files in a given directory that end with .yar when converted to lowercase.
         All files are monitored for changes to mtime, as well as new and removed files."""
         if not os.path.isdir(dir_path):
             log.error(f"{dir_path} is not a directory")
@@ -738,13 +760,13 @@ class YaraScanner(Filterable):
         # already tracking this one?
         if dir_path in self.tracked_dirs:
             return
-        
+
         self.tracked_dirs[dir_path] = YaraRuleDirectory(dir_path, *args, **kwargs)
         log.debug(f"tracking directory {dir_path} with {len(self.tracked_dirs[dir_path].tracked_files)} yara files")
 
     def track_yara_repository(self, dir_path, *args, **kwargs):
         """Adds all files in a given directory **that is a git repository** that end with .yar when converted to lowercase.  Only commits to the repository trigger rule reload."""
-        if not self.git_available(): # pragma: no cover
+        if not self.git_available():  # pragma: no cover
             log.warning("git cannot be found: defaulting to track_yara_dir")
             return self.track_yara_dir(dir_path)
 
@@ -803,8 +825,8 @@ class YaraScanner(Filterable):
         else:
             buffers.append(("random", os.urandom(1024 * 1024)))
 
-        #for x in range(255):
-            #buffers.append((f"chr({x})", bytes([x]) * (1024 * 1024)))
+        # for x in range(255):
+        # buffers.append((f"chr({x})", bytes([x]) * (1024 * 1024)))
 
         execution_times = []  # of (total_seconds, buffer_type, file_name, rule_name)
         execution_errors = []  # of (error_message, buffer_type, file_name, rule_name)
@@ -830,11 +852,11 @@ class YaraScanner(Filterable):
             # did this not parse with plyara?
             if yara_rule_file.is_plyara_incompatible:
                 try:
-                    # parse it again if we can 
+                    # parse it again if we can
                     # it was possible that there were dependency errors which we can handle here
                     parser = plyara.Plyara()
                     parsed_rule_list = parser.parse_string(yara_rule_file.source)
-                except Exception as e: # pragma: no cover
+                except Exception as e:  # pragma: no cover
                     log.warning(f"yara rule {yara_rule_file.file_path} is unparsable with plyara: {e}")
                     continue
             else:
@@ -903,15 +925,15 @@ class YaraScanner(Filterable):
                             dependencies.insert(0, dependency)
                             continue
 
-                    sys.stderr.write( # pragma: no cover
+                    sys.stderr.write(  # pragma: no cover
                         "rule {} in file {} does not compile by itself: {}\n".format(
                             rule_name, yara_files[rule_name], e
                         )
                     )
-                    rule_context = None # pragma: no cover
-                    break # pragma: no cover
+                    rule_context = None  # pragma: no cover
+                    break  # pragma: no cover
 
-            if not rule_context: # pragma: no cover
+            if not rule_context:  # pragma: no cover
                 continue
 
             trigger_test_strings = False
@@ -927,7 +949,7 @@ class YaraScanner(Filterable):
                     execution_times.append([buffer_name, yara_files[rule_name], rule_name, total_seconds])
                     if test_config.test_strings_if and total_seconds > test_config.test_strings_threshold:
                         trigger_test_strings = True
-                except Exception as e: # pragma: no cover
+                except Exception as e:  # pragma: no cover
                     execution_errors.append([buffer_name, yara_files[rule_name], rule_name, str(e)])
                     if test_config.test_strings_if:
                         trigger_test_strings = True
@@ -1001,14 +1023,14 @@ class YaraScanner(Filterable):
                                             end_time - start_time,
                                         ]
                                     )
-                                except Exception as e: # pragma: no cover
+                                except Exception as e:  # pragma: no cover
                                     string_errors.append(
                                         [buffer_name, yara_files[rule_name], rule_name, string_name, str(e)]
                                     )
 
                                 if test_config.show_progress_bar:
                                     string_bar.next()
-                        except Exception as e: # pragma: no cover
+                        except Exception as e:  # pragma: no cover
                             sys.stderr.write(f"failed to test string {string_name}: {e}\n")
                             string_errors.append(["N/A", yara_files[rule_name], rule_name, string_name, str(e)])
 
@@ -1039,11 +1061,11 @@ class YaraScanner(Filterable):
                 writer = csv.writer(fp)
                 writer.writerow(["buffer", "file", "rule", "error"])
                 for row in execution_errors:
-                    writer.writerow(row) # pragma: no cover
+                    writer.writerow(row)  # pragma: no cover
         else:
             print("BEGIN EXECUTION ERRORS")
             for row in execution_errors:
-                print(row) # pragma: no cover
+                print(row)  # pragma: no cover
             print("END EXECUTION ERRORS")
 
         if test_config.csv or test_config.string_performance_csv:
@@ -1067,17 +1089,17 @@ class YaraScanner(Filterable):
                 writer = csv.writer(fp)
                 writer.writerow(["buffer", "file", "rule", "string", "error"])
                 for row in string_errors:
-                    writer.writerow(row) # pragma: no cover
+                    writer.writerow(row)  # pragma: no cover
         else:
             print("BEGIN STRING EXECUTION ERRORS")
             for row in string_errors:
-                print(row) # pragma: no cover
+                print(row)  # pragma: no cover
             print("END STRING EXECUTION ERRORS")
 
         return True
 
     def load_rules(self, external_vars=DEFAULT_YARA_EXTERNALS):
-        return True # pragma: no cover
+        return True  # pragma: no cover
 
     def scan(self, file_path, yara_stdout_file=None, yara_stderr_file=None, external_vars={}, timeout=None):
         """
@@ -1172,7 +1194,9 @@ class YaraScanner(Filterable):
             self.scan_results.extend(yara_matches)
         else:
             for match_result in yara_matches:
-                if self.filter_check(extract_filters_from_metadata([match_result.meta]), file_path, mime_type=self.mime_type):
+                if self.filter_check(
+                    extract_filters_from_metadata([match_result.meta]), file_path, mime_type=self.mime_type
+                ):
                     log.debug(f"{file_path} matches post-filter for {match_result.rule}")
                     self.scan_results.append(match_result)
 
@@ -1242,7 +1266,7 @@ class YaraScannerServer(object):
     ):
 
         # set to True to gracefully shutdown
-        self.shutdown = None # see start()
+        self.shutdown = None  # see start()
 
         # set to True to gracefully shutdown the current scanner (used for reloading)
         self.current_scanner_shutdown = None  # threading.Event
@@ -1290,7 +1314,7 @@ class YaraScannerServer(object):
 
         # set to True when we receive a SIGUSR1
         self.sigusr1 = False
-        
+
         # save default timeout to use for scanner
         self.default_timeout = default_timeout
 
@@ -1482,7 +1506,7 @@ class YaraScannerServer(object):
         else:
             # parse the ext vars json
             ext_vars = json.loads(ext_vars.decode())
-            
+
         # is it time to check for rule refresh?
         if time.time() >= self.next_rule_update_time:
             log.info("checking yara rules")
@@ -1637,21 +1661,21 @@ def send_block0(s):
 @dataclass
 class TestConfig:
     __test__ = False
-    test:bool = False
-    test_rule:bool = None
-    test_strings:bool = False
-    test_strings_if:bool = False
-    test_strings_threshold:float = 0.1
-    test_data:str = None
-    csv:str = None
-    performance_csv:str = None
-    failure_csv:str = None
-    string_performance_csv:str = None
-    string_failure_csv:str = None
-    show_progress_bar:bool = False
+    test: bool = False
+    test_rule: bool = None
+    test_strings: bool = False
+    test_strings_if: bool = False
+    test_strings_threshold: float = 0.1
+    test_data: str = None
+    csv: str = None
+    performance_csv: str = None
+    failure_csv: str = None
+    string_performance_csv: str = None
+    string_failure_csv: str = None
+    show_progress_bar: bool = False
 
 
-def main(): # pragma: no cover
+def main():  # pragma: no cover
     import argparse
     import pprint
     import sys
@@ -1820,14 +1844,16 @@ def main(): # pragma: no cover
         dest="disable_prefilter",
         action="store_true",
         default=False,
-        help="Disable prefiltering rules to boost scanning performance.")
+        help="Disable prefiltering rules to boost scanning performance.",
+    )
 
     parser.add_argument(
         "--disable-postfilter",
         dest="disable_postfilter",
         action="store_true",
         default=False,
-        help="Disable postfiltering.")
+        help="Disable postfiltering.",
+    )
 
     args = parser.parse_args()
 
@@ -1841,7 +1867,7 @@ def main(): # pragma: no cover
 
     log_levels = {0: logging.ERROR, 1: logging.WARNING, 2: logging.INFO, 3: logging.DEBUG}
     log_level = min(max(args.verbose, 0), 3)  # clamp to 0-3 inclusive
-    logging.getLogger('plyara').setLevel(logging.ERROR)
+    logging.getLogger("plyara").setLevel(logging.ERROR)
     logging.basicConfig(level=log_levels[log_level])
 
     scanner = YaraScanner(
