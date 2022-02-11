@@ -882,6 +882,69 @@ def test_YaraScanner_scan_data(timeout, tmp_path):
     # this should not match
     assert not scanner.scan_data('random data', timeout=timeout)
 
+@pytest.mark.integration
+def test_YaraScanner_filtering(tmp_path):
+    bas_rule_path = tmp_path / 'bas_rule.yar'
+    bas_rule_path.write_text("""
+rule bas_rule {
+    meta:
+        file_ext = "bas"
+    strings:
+        $ = "test_1"
+    condition:
+        any of them
+}
+""")
+
+    exe_rule_path = tmp_path / 'exe_rule.yar'
+    exe_rule_path.write_text("""
+rule exe_rule {
+    meta:
+        file_ext = "exe"
+    strings:
+        $ = "test_2"
+    condition:
+        any of them
+}
+""")
+
+    scanner = YaraScanner(disable_postfiltering=True)
+    scanner.track_yara_file(str(bas_rule_path))
+    scanner.track_yara_file(str(exe_rule_path))
+
+    # these two contexts should be different
+    assert not (scanner.get_yara_context("sample.bas") is scanner.get_yara_context("sample.exe"))
+    # and these two should be the same
+    assert scanner.get_yara_context("sample.bas") is scanner.get_yara_context("file.bas")
+
+    target_file = tmp_path / 'target.exe'
+    target_file.write_text("test_1")
+
+    # even though test_1 matches bas_rule, we don't get a match because of the prefiltering
+    assert not scanner.scan(str(target_file))
+
+    scanner = YaraScanner(disable_prefiltering=True)
+    scanner.track_yara_file(str(bas_rule_path))
+    scanner.track_yara_file(str(exe_rule_path))
+
+    # if prefiltering is disabled then there is only one context to be used
+    assert scanner.get_yara_context("sample.bas") is scanner.get_yara_context("sample.exe")
+    assert scanner.get_yara_context("sample.bas") is scanner.get_yara_context("file.bas")
+
+    # but this also works because of post filtering
+    assert not scanner.scan(str(target_file))
+
+    scanner = YaraScanner(disable_prefiltering=True, disable_postfiltering=True)
+    scanner.track_yara_file(str(bas_rule_path))
+    scanner.track_yara_file(str(exe_rule_path))
+
+    # if all filtering is disabled you get a single yara context
+    assert scanner.get_yara_context("sample.bas") is scanner.get_yara_context("sample.exe")
+    assert scanner.get_yara_context("sample.bas") is scanner.get_yara_context("file.bas")
+
+    # but this matches because there is no filtering
+    assert scanner.scan(str(target_file))
+
 @pytest.mark.unit
 def test_YaraScanner_json_match(tmp_path):
     rule_path = tmp_path / "test_rule.yar"

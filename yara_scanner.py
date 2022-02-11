@@ -581,6 +581,8 @@ class YaraScanner:
         signature_dir=None,
         test_mode=False,
         default_timeout=DEFAULT_TIMEOUT,
+        disable_prefiltering=False,
+        disable_postfiltering=False,
         *args,
         **kwargs,
     ):
@@ -608,6 +610,12 @@ class YaraScanner:
 
         # the dictionary of yara contexts to use for given rulesets
         self.yara_contexts = {} # key = generate_context_key(), value = compiled yara context
+
+        # if this is set then we disable prefiltering
+        self.disable_prefiltering = disable_prefiltering
+
+        # if this is set then we disable postfiltering
+        self.disable_postfiltering = disable_postfiltering
 
         # a convenience function to load yara rules stored in a commonly seen organization
         if signature_dir is not None:
@@ -651,11 +659,11 @@ class YaraScanner:
         filtered_yara_rules = []
         for yara_rule_file in self.all_yara_rule_files:
             for yara_rule in yara_rule_file.yara_rules:
-                if file_path:
+                if file_path and not self.disable_prefiltering:
                     if yara_rule.filter_matches(file_path):
                         filtered_yara_rules.append(yara_rule)
                 else:
-                    # if the file is not specified then we include all rules
+                    # if the file is not specified or prefiltering is disabled then we include all rules
                     filtered_yara_rules.append(yara_rule)
 
         # get the lookup key for this set of yara rules
@@ -1170,10 +1178,14 @@ class YaraScanner:
         # the list of matches after we filter
         self.scan_results = []
 
-        for match_result in yara_matches:
-            filter_check = create_filter_check(extract_filters_from_metadata([match_result.meta]))
-            if filter_check(file_path):
-                self.scan_results.append(match_result)
+        # if post filtering is disabled then we return all matches
+        if self.disable_postfiltering:
+            self.scan_results.extend(yara_matches)
+        else:
+            for match_result in yara_matches:
+                filter_check = create_filter_check(extract_filters_from_metadata([match_result.meta]))
+                if filter_check(file_path):
+                    self.scan_results.append(match_result)
 
         # get rid of the yara object and just return dict
         # also includes a "target" (reference to what was scanned)
