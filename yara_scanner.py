@@ -1248,7 +1248,7 @@ class YaraScannerServer(object):
     ):
 
         # set to True to gracefully shutdown
-        self.shutdown = multiprocessing.Event()
+        self.shutdown = None # see start()
 
         # set to True to gracefully shutdown the current scanner (used for reloading)
         self.current_scanner_shutdown = None  # threading.Event
@@ -1271,6 +1271,9 @@ class YaraScannerServer(object):
 
         # how often do we check to see if the yara rules changed? (in seconds)
         self.update_frequency = update_frequency
+
+        # the next time we need to update the yara rules
+        self.next_rule_update_time = time.time() + self.update_frequency
 
         # parameter to the socket.listen() function (how many connections to backlog)
         self.backlog = backlog
@@ -1388,6 +1391,8 @@ class YaraScannerServer(object):
         self.scanner = new_scanner
 
     def start(self):
+        # initialize shutdown control
+        self.shutdown = multiprocessing.Event()
         self.process_manager = multiprocessing.Process(target=self.run_process_manager)
         self.process_manager.start()
         log.info("started process manager on pid {}".format(self.process_manager.pid))
@@ -1421,9 +1426,6 @@ class YaraScannerServer(object):
             # load up the yara scanner
             self.initialize_scanner()
 
-            # watch for the rules to change in another thread
-            self.start_rules_monitor()
-
             while not self.shutdown.is_set():
                 try:
                     self.execute()
@@ -1441,7 +1443,6 @@ class YaraScannerServer(object):
         except KeyboardInterrupt:
             log.info("caught keyboard interrupt - exiting")
 
-        self.stop_rules_monitor()
         self.kill_server_socket()
 
     def execute(self):
@@ -1467,6 +1468,8 @@ class YaraScannerServer(object):
             self.process_client(client_socket)
         except Exception as e:
             log.info("unable to process client request: {}".format(e))
+            exc_type, reported_exception, tb = sys.exc_info()
+            traceback.print_tb(tb)
         finally:
             try:
                 client_socket.close()
@@ -1485,6 +1488,12 @@ class YaraScannerServer(object):
         else:
             # parse the ext vars json
             ext_vars = json.loads(ext_vars.decode())
+            
+        # is it time to check for rule refresh?
+        if time.time() >= self.next_rule_update_time:
+            log.info("checking yara rules")
+            self.next_rule_update_time = time.time() + self.update_frequency
+            self.scanner.check_rules()
 
         try:
             matches = False
@@ -1509,47 +1518,6 @@ class YaraScannerServer(object):
             # encode and submit the JSON result of the client
             # print(self.scanner.scan_results)
             send_data_block(client_socket, pickle.dumps(self.scanner.scan_results))
-
-    def start_rules_monitor(self):
-        """Starts a thread the monitor the yara rules. When it detects the yara rules
-        have changed it creates a new YaraScanner and swaps it in (for self.scanner)."""
-
-        self.rule_monitor_thread = threading.Thread(
-            target=self.rule_monitor_loop, name="Scanner {} Rules Monitor".format(self.cpu_index), daemon=False
-        )
-        self.rule_monitor_thread.start()
-
-    def rule_monitor_loop(self):
-        log.debug("starting rules monitoring")
-        counter = 0
-
-        while True:
-            if self.shutdown.is_set():
-                break
-
-            if self.current_scanner_shutdown.is_set():
-                break
-
-            if counter >= self.update_frequency:
-                log.debug("checking for new rules...")
-
-                # do we need to reload the yara rules?
-                if self.scanner.check_rules():
-                    self.current_scanner_shutdown.set()
-                    break
-
-                counter = 0
-
-            counter += 1
-            self.shutdown.wait(1)
-
-        log.debug("stopped rules monitoring")
-
-    def stop_rules_monitor(self):
-        self.current_scanner_shutdown.set()
-        self.rule_monitor_thread.join(5)
-        if self.rule_monitor_thread.is_alive():
-            log.error("unable to stop rule monitor thread")
 
 
 def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_dir=DEFAULT_SOCKET_DIR):
