@@ -22,10 +22,10 @@ from yara_scanner import (ALL_RESULT_KEYS, RESULT_KEY_META,
                           DEFAULT_NAMESPACE,
                           DEFAULT_TIMEOUT,
                           extract_filters_from_metadata,
-                          create_filter_check,
                           generate_context_key,
                           get_current_repo_commit,
                           is_yara_file,
+                          Filterable,
                           YaraRuleFile,
                           YaraRuleDirectory,
                           YaraRuleRepository,
@@ -154,9 +154,9 @@ def test_extract_filters_from_metadata(meta_dicts, expected_dict):
     ({META_FILTER_FILE_EXT: 'bas',
       META_FILTER_FILE_NAME: 'sub:targ'}, 'tarfet.bas', False),
 ])
-def test_create_filter_check(filters, target, result):
-    filter_check = create_filter_check(filters)
-    assert filter_check(target) == result
+def test_filter_check(filters, target, result):
+    filterable = Filterable()
+    assert filterable.filter_check(filters, target) == result
 
 @pytest.mark.unit
 def test_YaraRuleFile_file_missing():
@@ -923,7 +923,7 @@ rule exe_rule {
     # even though test_1 matches bas_rule, we don't get a match because of the prefiltering
     assert not scanner.scan(str(target_file))
 
-    scanner = YaraScanner(disable_prefiltering=True)
+    scanner = YaraScanner(disable_prefilter=True)
     scanner.track_yara_file(str(bas_rule_path))
     scanner.track_yara_file(str(exe_rule_path))
 
@@ -934,7 +934,7 @@ rule exe_rule {
     # but this also works because of post filtering
     assert not scanner.scan(str(target_file))
 
-    scanner = YaraScanner(disable_prefiltering=True, disable_postfiltering=True)
+    scanner = YaraScanner(disable_prefilter=True, disable_postfilter=True)
     scanner.track_yara_file(str(bas_rule_path))
     scanner.track_yara_file(str(exe_rule_path))
 

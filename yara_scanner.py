@@ -121,12 +121,45 @@ VALID_META_FILTERS = [
 yara.set_config(max_strings_per_rule=30720)
 log = logging.getLogger("yara-scanner")
 
-def create_filter_check(filters: dict[str, str]) -> callable:
-    """Given the directives, return the filter check function."""
-    
-    def filter_check(file_path: str) -> bool:
-        nonlocal filters
 
+def generate_context_key(rules: list[YaraRule]):
+    """Return the key to use for a give list of yara rules."""
+    return ','.join(sorted([_.parsed_rule['rule_name'] for _ in rules]))
+
+def is_yara_file(file_path: str) -> bool:
+    """Returns True if the given file name or path looks like it might be a yara file."""
+    if not file_path:
+        return False
+
+    if file_path.lower().endswith('.yar'):
+        return True
+
+    if file_path.lower().endswith('.yara'):
+        return True
+
+    return False
+
+def get_mime_type(file_path: str) -> str:
+    """Returns the mime type of the given file as returned by the file command."""
+    p = Popen(["file", "-b", "--mime-type", file_path], stdout=PIPE, stderr=PIPE, text=True)
+    mime_type, _ = p.communicate()
+    return mime_type.strip()
+
+def extract_filters_from_metadata(metadata: list[dict]) -> dict[str, str]:
+    """Extract the meta directives for filtering.
+    meta_dicts is the list of dicts that is the metadata field of what is returned by plyara
+    Returns the dict of filter_name: filter_value"""
+
+    result = {}
+    for meta_dict in metadata:
+        for key, value in meta_dict.items():
+            if key in VALID_META_FILTERS:
+                result[key] = value
+
+    return result
+
+class Filterable:
+    def filter_check(self, filters: dict[str, str], file_path: str, mime_type: str=None) -> bool:
         for directive, value in filters.items():
             # you can invert the logic by starting the value with !
             inverted = False
@@ -155,14 +188,6 @@ def create_filter_check(filters: dict[str, str]) -> callable:
                     compare_target = file_path.rsplit(".", maxsplit=1)[1]
 
             elif directive.lower() == "mime_type":
-                # have we determined the mime type for this file yet?
-                mime_type = ""
-                if file_path:
-                    p = Popen(["file", "-b", "--mime-type", file_path], stdout=PIPE, stderr=PIPE, text=True)
-                    mime_type, _ = p.communicate()
-                    mime_type = mime_type.strip()
-                    log.debug("got mime type {} for {}".format(mime_type, file_path))
-
                 compare_target = mime_type
 
             elif directive.lower() == "file_name":
@@ -200,49 +225,6 @@ def create_filter_check(filters: dict[str, str]) -> callable:
                 return False
 
         return True
-
-    return filter_check
-
-def generate_context_key(rules: list[YaraRule]):
-    """Return the key to use for a give list of yara rules."""
-    return ','.join(sorted([_.parsed_rule['rule_name'] for _ in rules]))
-
-def is_yara_file(file_path: str) -> bool:
-    """Returns True if the given file name or path looks like it might be a yara file."""
-    if not file_path:
-        return False
-
-    if file_path.lower().endswith('.yar'):
-        return True
-
-    if file_path.lower().endswith('.yara'):
-        return True
-
-    return False
-
-def extract_filters_from_metadata(metadata: list[dict]) -> dict[str, str]:
-    """Extract the meta directives for filtering.
-    meta_dicts is the list of dicts that is the metadata field of what is returned by plyara
-    Returns the dict of filter_name: filter_value"""
-
-    result = {}
-    for meta_dict in metadata:
-        for key, value in meta_dict.items():
-            if key in VALID_META_FILTERS:
-                result[key] = value
-
-    return result
-
-#
-# filter chaining
-# rule is_word_doc {
-#
-
-#
-# rule scans_word_doc {
-#     meta:
-#         filter_chain = "is_word_doc"
-#
 
 class YaraRuleDirectory:
     """A directory that contains yara rule files."""
@@ -464,23 +446,28 @@ class YaraRuleFile:
 
         return True
 
-class YaraRule:
+class YaraRule(Filterable):
     """A single yara rule parsed out with plyara."""
-    def __init__(self, parsed_rule: dict, namespace: str=None):
+    def __init__(self, parsed_rule: dict, *args, namespace: str=None, **kwargs):
+        super().__init__()
+
         # the parsed rule as returned by plyara
         self.parsed_rule = parsed_rule
         # the namespace, if provided, that this rule came from
         self.namespace = namespace if namespace else DEFAULT_NAMESPACE
 
-        # filtering function for this rule
+        # the list of meta filters for this yara rule
+        self.filters = {}
         if 'metadata' in self.parsed_rule:
-            self.filter_check = create_filter_check(extract_filters_from_metadata(self.parsed_rule['metadata']))
-        else:
-            # if this rule does not have metadata then it is included in all yara contexts
-            self.filter_check = lambda x: True
+            self.filters = extract_filters_from_metadata(self.parsed_rule['metadata'])
 
         # as long as this is set to True this rule can be used for scanning
         self.valid = True
+
+    def __str__(self):
+        return (f"YaraRule(name: {self.parsed_rule['rule_name']}, "
+                f"namespace: {self.namespace}, "
+                f"valid: {self.valid})")
 
     def invalidate(self):
         self.valid = False
@@ -490,11 +477,6 @@ class YaraRule:
         """Returns True if the rule is still valid.
         A rule becomes invalid if the source is modified in any way."""
         return self.valid
-
-    def filter_matches(self, target_file: str) -> bool:
-        """Returns True if the meta tag filtering for this rule matches the target file.
-        Should I scan this target file with this yara rule?"""
-        return self.filter_check(target_file)
 
 class YaraContext:
     """A compiled set of one or more yara rules or yara rule files."""
@@ -578,7 +560,7 @@ class YaraJSONEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, o) # pragma: no cover
 
 
-class YaraScanner:
+class YaraScanner(Filterable):
     """
     The primary object used for scanning files and data with yara rules."""
 
@@ -604,6 +586,9 @@ class YaraScanner:
         :type signature_dir: str or None
 
         """
+        super().__init__()
+
+        self.mime_type = None # the last mime type we recorded on a scan of a file
         self._scan_results = []
 
         # we keep track of when the rules change and (optionally) automatically re-load the rules
@@ -658,7 +643,7 @@ class YaraScanner:
         """Returns the list of YaraRuleFile objects that were not parsed with plyara and not in an error state."""
         return [_ for _ in self.all_yara_rule_files if not _.is_error_state and (_.is_plyara_incompatible or _.disable_plyara)]
 
-    def get_yara_context(self, file_path: str=None) -> YaraContext:
+    def get_yara_context(self, file_path: str=None, mime_type: str=None) -> YaraContext:
         """Returns the yara context to use for the given file.
         If a file is not specified, the default context is returned which contains all available rules."""
         # figure out which rules match which filters for teh given file
@@ -666,7 +651,8 @@ class YaraScanner:
         for yara_rule_file in self.all_yara_rule_files:
             for yara_rule in yara_rule_file.yara_rules:
                 if file_path and not self.disable_prefilter:
-                    if yara_rule.filter_matches(file_path):
+                    if yara_rule.filter_check(yara_rule.filters, file_path, mime_type):
+                        log.debug(f"{file_path} matches pre-filter for {yara_rule}")
                         filtered_yara_rules.append(yara_rule)
                 else:
                     # if the file is not specified or prefiltering is disabled then we include all rules
@@ -746,7 +732,7 @@ class YaraScanner:
             return
 
         self.tracked_files[file_path] = YaraRuleFile(file_path, *args, **kwargs)
-        log.debug("yara file {} tracked @ {}".format(file_path, self.tracked_files[file_path]))
+        log.debug(f"tracking yara file {file_path}")
 
     def track_yara_dir(self, dir_path, *args, **kwargs):
         """Adds all files in a given directory that end with .yar when converted to lowercase.  
@@ -1129,7 +1115,9 @@ class YaraScanner:
             timeout = self.default_timeout
 
         # get the yara context to use for this target file
-        yara_context = self.get_yara_context(file_path)
+        self.mime_type = get_mime_type(file_path)
+        log.debug(f"got mime type {self.mime_type} for {file_path}")
+        yara_context = self.get_yara_context(file_path, mime_type=self.mime_type)
 
         # scan the file
         if timeout == 0:
@@ -1160,6 +1148,7 @@ class YaraScanner:
             timeout = self.default_timeout
 
         # get the yara context to use
+        self.mime_type = None
         yara_context = self.get_yara_context()
 
         # scan the data stream
@@ -1189,8 +1178,8 @@ class YaraScanner:
             self.scan_results.extend(yara_matches)
         else:
             for match_result in yara_matches:
-                filter_check = create_filter_check(extract_filters_from_metadata([match_result.meta]))
-                if filter_check(file_path):
+                if self.filter_check(extract_filters_from_metadata([match_result.meta]), file_path, mime_type=self.mime_type):
+                    log.debug(f"{file_path} matches post-filter for {match_result.rule}")
                     self.scan_results.append(match_result)
 
         # get rid of the yara object and just return dict
