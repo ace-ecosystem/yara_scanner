@@ -1254,7 +1254,7 @@ DEFAULT_SIGNATURE_DIR = "/opt/signatures"
 DEFAULT_SOCKET_DIR = "socket"
 
 
-class YaraScannerServer(object):
+class YaraScannerServer:
     def __init__(
         self,
         base_dir=DEFAULT_BASE_DIR,
@@ -1263,10 +1263,10 @@ class YaraScannerServer(object):
         update_frequency=60,
         backlog=50,
         default_timeout=5,
+        max_workers=None,
+        disable_signal_handling=False,
+        use_threads=False,
     ):
-
-        # set to True to gracefully shutdown
-        self.shutdown = None  # see start()
 
         # set to True to gracefully shutdown the current scanner (used for reloading)
         self.current_scanner_shutdown = None  # threading.Event
@@ -1276,7 +1276,7 @@ class YaraScannerServer(object):
 
         # list of YaraScannerServer Process objects
         # there will be one per cpu available as returned by multiprocessing.cpu_count()
-        self.servers = [None for _ in range(multiprocessing.cpu_count())]
+        self.servers = [None for _ in range(multiprocessing.cpu_count() if max_workers is None else max_workers)]
 
         # base directory of yara scanner
         self.base_dir = base_dir
@@ -1318,6 +1318,22 @@ class YaraScannerServer(object):
         # save default timeout to use for scanner
         self.default_timeout = default_timeout
 
+        # test support functions
+        # disable signal handling 
+        self.disable_signal_handling = disable_signal_handling
+
+        # multiprocessing mode
+        # if this is set to True then we use threading.Thread instead of multiprocessing.Process
+        self.use_threads = use_threads
+
+        # set when the server has fully started
+        if self.use_threads:
+            self.started_event = threading.Event()
+            self.shutdown_event = threading.Event()
+        else: # pragma: no cover
+            self.started_event = multiprocessing.Event()
+            self.shutdown_event = multiprocessing.Event()
+
     #
     # scanning processes die when they need to reload rules
     # this is due to what seems like a minor memory leak in the yara python library
@@ -1325,27 +1341,31 @@ class YaraScannerServer(object):
     #
 
     def run_process_manager(self):
-        def _handler(signum, frame):
-            self.shutdown.set()
+        def _handler(signum, frame): # pragma: no cover
+            self.shutdown_event.set()
 
-        signal.signal(signal.SIGTERM, _handler)
-        signal.signal(signal.SIGINT, _handler)
+        if not self.disable_signal_handling: # pragma: no cover
+            signal.signal(signal.SIGTERM, _handler)
+            signal.signal(signal.SIGINT, _handler)
 
         try:
-            while not self.shutdown.is_set():
+            # TODO just sleep on the shutdown
+            while not self.shutdown_event.is_set():
                 try:
                     self.execute_process_manager()
-                    time.sleep(0.1)
+                    self.started_event.set()
+                    self.shutdown_event.wait(1)
                 except Exception as e:
                     log.error("uncaught exception: {}".format(e))
                     time.sleep(1)
-        except KeyboardInterrupt:
+
+        except KeyboardInterrupt: # pragma: no cover
             pass
 
         # wait for all the scanners to die...
         for server in self.servers:
             if server:
-                log.info("waiting for scanner {} to exit...".format(server.pid))
+                log.info("waiting for scanner {} to exit...".format(server))
                 server.join()
 
         log.info("exiting")
@@ -1354,18 +1374,23 @@ class YaraScannerServer(object):
         for i, p in enumerate(self.servers):
             if self.servers[i] is not None:
                 if not self.servers[i].is_alive():
-                    log.info("detected dead scanner {}".format(self.servers[i].pid))
+                    log.info("detected dead scanner {}".format(self.servers[i]))
                     self.servers[i].join()
                     self.servers[i] = None
 
         for i, scanner in enumerate(self.servers):
             if scanner is None:
                 logging.info("starting scanner on cpu {}".format(i))
-                self.servers[i] = multiprocessing.Process(
-                    target=self.run, name="Yara Scanner Server ({})".format(i), args=(i,)
-                )
+                if self.use_threads:
+                    self.servers[i] = threading.Thread(
+                        target=self.run, name="Yara Scanner Server ({})".format(i), args=(i,)
+                    )
+                else: # pragma: no cover
+                    self.servers[i] = multiprocessing.Process(
+                        target=self.run, name="Yara Scanner Server ({})".format(i), args=(i,)
+                    )
                 self.servers[i].start()
-                log.info("started scanner on cpu {} with pid {}".format(i, self.servers[i].pid))
+                log.info("started scanner on cpu {} with pid {}".format(i, self.servers[i]))
 
     def initialize_server_socket(self):
         self.server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1404,20 +1429,25 @@ class YaraScannerServer(object):
 
     def initialize_scanner(self):
         log.info("initializing scanner")
-        new_scanner = YaraScanner(signature_dir=self.signature_dir, default_timeout=self.default_timeout)
-        new_scanner.load_rules()
-        self.scanner = new_scanner
+        self.scanner = YaraScanner(signature_dir=self.signature_dir, default_timeout=self.default_timeout)
 
-    def start(self):
+    def start(self, timeout=None):
         # initialize shutdown control
-        self.shutdown = multiprocessing.Event()
-        self.process_manager = multiprocessing.Process(target=self.run_process_manager)
+        if self.use_threads:
+            self.started_event = threading.Event()
+            self.process_manager = threading.Thread(target=self.run_process_manager)
+        else: # pragma: no cover
+            self.started_event = multiprocessing.Event()
+            self.process_manager = multiprocessing.Process(target=self.run_process_manager)
+
         self.process_manager.start()
-        log.info("started process manager on pid {}".format(self.process_manager.pid))
+        log.info("waiting for process manger to start...")
+        self.started_event.wait(timeout=timeout)
+        log.info("started process manager on pid {}".format(self.process_manager))
 
     def stop(self):
-        if not self.shutdown.is_set():
-            self.shutdown.set()
+        if not self.shutdown_event.is_set():
+            self.shutdown_event.set()
 
         self.wait()
         # process manager waits for the child processes to exit so we're done at this point
@@ -1429,27 +1459,35 @@ class YaraScannerServer(object):
             self.process_manager = None
 
     def run(self, cpu_index):
+
         self.cpu_index = cpu_index  # starting at 0
 
-        def _handler(signum, frame):
+        if self.use_threads:
+            self.current_scanner_shutdown = threading.Event()
+        else: # pragma: no cover
+            self.current_scanner_shutdown = multiprocessing.Event()
+
+        def _handler(signum, frame): # pragma: no cover
             self.current_scanner_shutdown.set()
 
-        signal.signal(signal.SIGHUP, _handler)
-        signal.signal(signal.SIGTERM, _handler)
-        signal.signal(signal.SIGINT, _handler)
-
-        self.current_scanner_shutdown = threading.Event()
+        if not self.disable_signal_handling: # pragma: no cover
+            signal.signal(signal.SIGHUP, _handler)
+            signal.signal(signal.SIGTERM, _handler)
+            signal.signal(signal.SIGINT, _handler)
 
         try:
             # load up the yara scanner
             self.initialize_scanner()
 
-            while not self.shutdown.is_set():
+            while True:
                 try:
                     self.execute()
 
                     if self.current_scanner_shutdown.is_set():
                         log.info("got signal to reload rules: exiting...")
+                        break
+
+                    if self.shutdown_event.is_set():
                         break
 
                 except InterruptedError:
@@ -1471,7 +1509,7 @@ class YaraScannerServer(object):
             except Exception as e:
                 self.kill_server_socket()
                 # don't spin the cpu on failing to allocate the socket
-                self.shutdown.wait(timeout=1)
+                self.shutdown_event.wait(timeout=1)
                 return
 
         # get the next client connection
@@ -1486,8 +1524,6 @@ class YaraScannerServer(object):
             self.process_client(client_socket)
         except Exception as e:
             log.info("unable to process client request: {}".format(e))
-            exc_type, reported_exception, tb = sys.exc_info()
-            traceback.print_tb(tb)
         finally:
             try:
                 client_socket.close()
