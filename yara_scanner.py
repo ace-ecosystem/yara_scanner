@@ -771,18 +771,18 @@ class YaraScanner(Filterable):
             return self.track_yara_dir(dir_path)
 
         if not os.path.isdir(dir_path):
-            log.error("{} is not a directory".format(dir_path))
+            log.error(f"{dir_path} is not a directory")
             return False
 
         if not os.path.exists(os.path.join(dir_path, ".git")):
-            log.error("{} is not a git repository (missing .git)".format(dir_path))
+            log.error(f"{dir_path} is not a git repository (missing .git)")
             return False
 
         if dir_path in self.tracked_repos:
             return False
 
         self.tracked_repos[dir_path] = YaraRuleRepository(dir_path, *args, **kwargs)
-        log.debug("tracking git repo {} @ {}".format(dir_path, self.tracked_repos[dir_path]))
+        log.debug(f"tracking git repo {dir_path} with {len(self.tracked_repos[dir_path].tracked_files)} yara files")
 
     def check_rules(self):
         """
@@ -912,7 +912,7 @@ class YaraScanner(Filterable):
                 dep_source = "\n".join([plyara.utils.rebuild_yara_rule(parsed_rules[r]) for r in dependencies])
                 try:
                     rule_context = yara.compile(
-                        source="{}\n{}".format(dep_source, plyara.utils.rebuild_yara_rule(parsed_rules[rule_name]))
+                        source=f"{dep_source}\n{plyara.utils.rebuild_yara_rule(parsed_rules[rule_name])}"
                     )
                     break
                 except Exception as e:
@@ -926,9 +926,7 @@ class YaraScanner(Filterable):
                             continue
 
                     sys.stderr.write(  # pragma: no cover
-                        "rule {} in file {} does not compile by itself: {}\n".format(
-                            rule_name, yara_files[rule_name], e
-                        )
+                        f"rule {rule_name} in file {yara_files[rule_name]} does not compile by itself: {e}\n"
                     )
                     rule_context = None  # pragma: no cover
                     break  # pragma: no cover
@@ -1346,7 +1344,7 @@ class YaraScannerWorker:
             log.info("closing server socket")
             self.server_socket.close()
         except Exception as e:
-            log.error("unable to close server socket: {}".format(e))
+            log.error(f"unable to close server socket: {e}")
 
         self.server_socket = None
 
@@ -1354,7 +1352,7 @@ class YaraScannerWorker:
             try:
                 os.remove(self.socket_path)
             except Exception as e:
-                logging.error("unable to remove {}: {}".format(self.socket_path, e))
+                logging.error(f"unable to remove {self.socket_path}: {e}")
 
     def initialize_scanner(self):
         log.info("initializing scanner")
@@ -1390,7 +1388,7 @@ class YaraScannerWorker:
                 break
 
             except Exception as e:
-                log.error("uncaught exception: {} ({})".format(e, type(e)))
+                log.error(f"uncaught exception: {e} ({type(e)})")
                 self.shutdown_event.wait(1)
 
         self.kill_server_socket()
@@ -1419,12 +1417,12 @@ class YaraScannerWorker:
         try:
             self.process_client(client_socket)
         except Exception as e:
-            log.info("unable to process client request: {}".format(e))
+            log.info(f"unable to process client request: {e}")
         finally:
             try:
                 client_socket.close()
             except Exception as e:
-                log.error("unable to close client connection: {}".format(e))
+                log.error(f"unable to close client connection: {e}")
 
     def process_client(self, client_socket):
         # read the command byte
@@ -1448,16 +1446,16 @@ class YaraScannerWorker:
         try:
             matches = False
             if command == COMMAND_FILE_PATH:
-                log.info("scanning file {}".format(data_or_file))
+                log.info(f"scanning file {data_or_file}")
                 matches = self.scanner.scan(data_or_file, external_vars=ext_vars)
             elif command == COMMAND_DATA_STREAM:
-                log.info("scanning {} byte data stream".format(len(data_or_file)))
+                log.info(f"scanning {len(data_or_file)} byte data stream")
                 matches = self.scanner.scan_data(data_or_file, external_vars=ext_vars)
             else:
-                log.error("invalid command {}".format(command))
+                log.error(f"invalid command {command}")
                 return
         except Exception as e:
-            log.info("scanning failed: {}".format(e))
+            log.info(f"scanning failed: {e}")
             send_data_block(client_socket, pickle.dumps(e))
             return
 
@@ -1549,7 +1547,7 @@ class YaraScannerServer:
                 log.info("got keyboard interrupt")
                 self.shutdown_event.set()
             except Exception as e: # pragma: no cover
-                log.error("uncaught exception: {}".format(e))
+                log.error(f"uncaught exception: {e}")
 
             self.shutdown_event.wait(1)
             if self.shutdown_event.is_set():
@@ -1558,7 +1556,7 @@ class YaraScannerServer:
         # wait for all the scanners to die...
         for worker in self.workers:
             if worker:
-                log.info("waiting for scanner {} to exit...".format(worker))
+                log.info(f"waiting for scanner {worker} to exit...")
                 worker.stop()
 
         log.info("exiting")
@@ -1567,13 +1565,13 @@ class YaraScannerServer:
         for i, p in enumerate(self.workers):
             if self.workers[i] is not None:
                 if not self.workers[i].is_alive():
-                    log.info("detected dead scanner {}".format(self.workers[i]))
+                    log.info(f"detected dead scanner {self.workers[i]}")
                     self.workers[i].stop()
                     self.workers[i] = None
 
         for i, worker in enumerate(self.workers):
             if worker is None:
-                logging.info("starting scanner on cpu {}".format(i))
+                logging.info(f"starting scanner on cpu {i}")
                 self.workers[i] = YaraScannerWorker(
                         base_dir=self.base_dir,
                         signature_dir=self.signature_dir,
@@ -1587,7 +1585,7 @@ class YaraScannerServer:
                         cpu_index=i)
 
                 self.workers[i].start()
-                log.info("started scanner on cpu {} with pid {}".format(i, self.workers[i]))
+                log.info(f"started scanner on cpu {i} with pid {self.workers[i]}")
 
     def start(self):
         def _handler(signum, frame): # pragma: no cover
@@ -1639,7 +1637,7 @@ def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_
             return result
 
         except socket.error as e:
-            log.debug("possible restarting scanner: {}".format(e))
+            log.debug(f"possible restarting scanner: {e}")
             # in the case where a scanner is restarting (when loading rules)
             # we will receive a socket error when we try to connect
             # just move on to the next socket and try again
@@ -1682,7 +1680,7 @@ def read_n_bytes(s, n):
 
     result = b"".join(_buffer)
     if len(result) != n:
-        log.warning("expected {} bytes but read {}".format(n, len(result)))
+        log.warning(f"expected {n} bytes but read {len(result)}")
 
     return b"".join(_buffer)
 
@@ -1691,7 +1689,7 @@ def read_data_block_size(s):
     """Reads the size of the next data block from the given socket."""
     size = struct.unpack("!I", read_n_bytes(s, 4))
     size = size[0]
-    log.debug("read command block size {}".format(size))
+    log.debug(f"read command block size {size}")
     return size
 
 
@@ -1987,9 +1985,9 @@ def main():  # pragma: no cover
                 else:
                     print(file_path)
                     for match in scanner.scan_results:
-                        print("\t{}".format(match["rule"]))
+                        print(f"\t{match['rule']}")
         except Exception as e:
-            log.error("scan failed for {}: {}".format(file_path, e))
+            log.error(f"scan failed for {file_path}: {e}")
             exit_result = 1
 
     def scan_dir(dir_path):
