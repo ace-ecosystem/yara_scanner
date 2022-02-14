@@ -1570,7 +1570,9 @@ class YaraScannerServer:
             self.sigterm = True
 
         if not self.disable_signal_handling:  # pragma: no cover
-            signal.signal(signal.SIGTERM, _handler)
+            # make sure we're on the right thread
+            if threading.current_thread() == threading.main_thread():
+                signal.signal(signal.SIGTERM, _handler)
 
         while True:
             try:
