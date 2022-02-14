@@ -1251,6 +1251,7 @@ DEFAULT_BASE_DIR = "/opt/yara_scanner"
 DEFAULT_SIGNATURE_DIR = "/opt/signatures"
 DEFAULT_SOCKET_DIR = "socket"
 
+
 class YaraScannerWorker:
     def __init__(
         self,
@@ -1263,7 +1264,7 @@ class YaraScannerWorker:
         disable_signal_handling=False,
         use_threads=False,
         shutdown_event=None,
-        cpu_index=None
+        cpu_index=None,
     ):
         self.base_dir = base_dir
         self.signature_dir = signature_dir
@@ -1286,13 +1287,13 @@ class YaraScannerWorker:
         if self.use_threads:
             self.worker_shutdown = threading.Event()
             self.started_event = threading.Event()
-        else: # pragma: no cover
+        else:  # pragma: no cover
             self.worker_shutdown = multiprocessing.Event()
             self.started_event = multiprocessing.Event()
 
     def is_alive(self) -> bool:
         if self.process_thread is None:
-            return True # still initializing
+            return True  # still initializing
 
         return self.process_thread.is_alive()
 
@@ -1300,7 +1301,7 @@ class YaraScannerWorker:
         thread_name = f"Yara Scanner Worker {self.cpu_index}"
         if self.use_threads:
             self.process_thread = threading.Thread(name=thread_name, target=self.run)
-        else: # pragma: no cover
+        else:  # pragma: no cover
             self.process_thread = multiprocessing.Process(name=thread_name, target=self.run)
 
         self.process_thread.start()
@@ -1330,7 +1331,7 @@ class YaraScannerWorker:
         if os.path.exists(self.socket_path):
             try:
                 os.remove(self.socket_path)
-            except Exception as e: # pragma: no cover
+            except Exception as e:  # pragma: no cover
                 log.error(f"unable to remove {self.socket_path}: {e}")
 
         self.server_socket.bind(self.socket_path)
@@ -1343,7 +1344,7 @@ class YaraScannerWorker:
         try:
             log.info("closing server socket")
             self.server_socket.close()
-        except Exception as e: # pragma: no cover
+        except Exception as e:  # pragma: no cover
             log.error(f"unable to close server socket: {e}")
 
         self.server_socket = None
@@ -1351,7 +1352,7 @@ class YaraScannerWorker:
         try:
             if os.path.exists(self.socket_path):
                 os.remove(self.socket_path)
-        except Exception as e: # pragma: no cover
+        except Exception as e:  # pragma: no cover
             logging.error(f"unable to remove {self.socket_path}: {e}")
 
     def initialize_scanner(self):
@@ -1359,19 +1360,19 @@ class YaraScannerWorker:
         self.scanner = YaraScanner(signature_dir=self.signature_dir, default_timeout=self.default_timeout)
 
     def run(self):
-        def _handler(signum, frame): # pragma: no cover
+        def _handler(signum, frame):  # pragma: no cover
             log.info("WORKER SIGNAL HANDLER")
             self.worker_shutdown.set()
 
-        if not self.disable_signal_handling: # pragma: no cover
-            signal.signal(signal.SIGHUP, _handler) # TODO handle this
+        if not self.disable_signal_handling:  # pragma: no cover
+            signal.signal(signal.SIGHUP, _handler)  # TODO handle this
             signal.signal(signal.SIGTERM, _handler)
             signal.signal(signal.SIGINT, _handler)
 
         # load up the yara scanner
         try:
             self.initialize_scanner()
-        except Exception as e: # pragma: no cover
+        except Exception as e:  # pragma: no cover
             log.error(f"unable to initialize scanner: {e}")
 
         while True:
@@ -1386,11 +1387,11 @@ class YaraScannerWorker:
                     log.info("server shutdown")
                     break
 
-            except KeyboardInterrupt: # pragma: no cover
+            except KeyboardInterrupt:  # pragma: no cover
                 log.info("caught keyboard interrupt - exiting")
                 break
 
-            except Exception as e: # pragma: no cover
+            except Exception as e:  # pragma: no cover
                 log.error(f"uncaught exception: {e} ({type(e)})")
                 self.shutdown_event.wait(1)
 
@@ -1428,7 +1429,7 @@ class YaraScannerWorker:
         finally:
             try:
                 client_socket.close()
-            except Exception as e: # pragma: no cover
+            except Exception as e:  # pragma: no cover
                 log.error(f"unable to close client connection: {e}")
 
     def process_client(self, client_socket):
@@ -1474,6 +1475,7 @@ class YaraScannerWorker:
             # print(self.scanner.scan_results)
             send_data_block(client_socket, pickle.dumps(self.scanner.scan_results))
 
+
 class YaraScannerServer:
     def __init__(
         self,
@@ -1506,7 +1508,6 @@ class YaraScannerServer:
         # how often do we check to see if the yara rules changed? (in seconds)
         self.update_frequency = update_frequency
 
-
         # parameter to the socket.listen() function (how many connections to backlog)
         self.backlog = backlog
 
@@ -1536,7 +1537,7 @@ class YaraScannerServer:
         self.default_timeout = default_timeout
 
         # test support functions
-        # disable signal handling 
+        # disable signal handling
         self.disable_signal_handling = disable_signal_handling
 
         # multiprocessing mode
@@ -1546,7 +1547,7 @@ class YaraScannerServer:
         # set when the server has fully started
         if self.use_threads:
             self.shutdown_event = threading.Event()
-        else: # pragma: no cover
+        else:  # pragma: no cover
             self.shutdown_event = multiprocessing.Event()
 
     def execute(self):
@@ -1561,11 +1562,11 @@ class YaraScannerServer:
                     self.shutdown_event.set()
                     break
 
-            except KeyboardInterrupt: # pragma: no cover
+            except KeyboardInterrupt:  # pragma: no cover
                 log.info("got keyboard interrupt")
                 self.shutdown_event.set()
                 break
-            except Exception as e: # pragma: no cover
+            except Exception as e:  # pragma: no cover
                 log.error(f"uncaught exception: {e}")
                 time.sleep(1)
 
@@ -1590,26 +1591,27 @@ class YaraScannerServer:
             if worker is None:
                 logging.info(f"starting scanner on cpu {i}")
                 self.workers[i] = YaraScannerWorker(
-                        base_dir=self.base_dir,
-                        signature_dir=self.signature_dir,
-                        socket_dir=self.socket_dir,
-                        update_frequency=self.update_frequency,
-                        backlog=self.backlog,
-                        default_timeout=self.default_timeout,
-                        disable_signal_handling=self.disable_signal_handling,
-                        use_threads=self.use_threads,
-                        shutdown_event=self.shutdown_event,
-                        cpu_index=i)
+                    base_dir=self.base_dir,
+                    signature_dir=self.signature_dir,
+                    socket_dir=self.socket_dir,
+                    update_frequency=self.update_frequency,
+                    backlog=self.backlog,
+                    default_timeout=self.default_timeout,
+                    disable_signal_handling=self.disable_signal_handling,
+                    use_threads=self.use_threads,
+                    shutdown_event=self.shutdown_event,
+                    cpu_index=i,
+                )
 
                 self.workers[i].start()
                 log.info(f"started scanner on cpu {i} with pid {self.workers[i]}")
 
     def start(self):
-        def _handler(signum, frame): # pragma: no cover
+        def _handler(signum, frame):  # pragma: no cover
             log.info("SIGNAL HANDLER CALLED")
             self.sigterm = True
 
-        if not self.disable_signal_handling: # pragma: no cover
+        if not self.disable_signal_handling:  # pragma: no cover
             signal.signal(signal.SIGTERM, _handler)
 
         self.execute()
@@ -1619,10 +1621,15 @@ class YaraScannerServer:
         if not self.shutdown_event.is_set():
             self.shutdown_event.set()
 
-def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_dir=DEFAULT_SOCKET_DIR, max_workers=None):
+
+def _scan(
+    command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_dir=DEFAULT_SOCKET_DIR, max_workers=None
+):
     # pick a random scanner
     # it doesn't matter which one, as long as the load is evenly distributed
-    starting_index = scanner_index = random.randrange(multiprocessing.cpu_count() if max_workers is None else max_workers)
+    starting_index = scanner_index = random.randrange(
+        multiprocessing.cpu_count() if max_workers is None else max_workers
+    )
 
     while True:
         socket_path = os.path.join(base_dir, socket_dir, str(scanner_index))
@@ -1638,7 +1645,7 @@ def _scan(command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_
             client_socket.sendall(command)
 
             if isinstance(data_or_file, str):
-                data_or_file = data_or_file.encode(errors='ignore')
+                data_or_file = data_or_file.encode(errors="ignore")
 
             send_data_block(client_socket, data_or_file)
             send_data_block(client_socket, ext_vars_json)
@@ -1702,6 +1709,7 @@ def read_n_bytes(s, n):
 
     return b"".join(_buffer)
 
+
 def read_data_block(s):
     """Reads the next data block from socket s. Returns the bytearray of the data portion of the block."""
     # read the size of the data block (4 byte network order integer)
@@ -1710,6 +1718,7 @@ def read_data_block(s):
     # log.debug("read command block size {}".format(size))
     # read the data portion of the data block
     return read_n_bytes(s, size)
+
 
 def send_data_block(s, data):
     """Writes the given data to the given socket as a data block."""
@@ -2006,5 +2015,5 @@ def main():  # pragma: no cover
     sys.exit(exit_result)
 
 
-if __name__ == "__main__": # pragma: no cover
+if __name__ == "__main__":  # pragma: no cover
     main()
