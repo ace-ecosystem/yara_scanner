@@ -115,6 +115,7 @@ VALID_META_FILTERS = [
 
 yara.set_config(max_strings_per_rule=30720)
 log = logging.getLogger("yara-scanner")
+log.propagate = False
 
 
 def generate_context_key(rules: list[YaraRule]):
@@ -1569,6 +1570,7 @@ class YaraScannerServer:
                     for worker in self.workers:
                         log.info(f"waiting for worker {worker} to start")
                         worker.wait_for_start()
+                        log.info(f"worker {worker} to started")
 
                     # let controlling process know we started
                     self.started_event.set()
