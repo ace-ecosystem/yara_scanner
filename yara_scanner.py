@@ -1343,16 +1343,16 @@ class YaraScannerWorker:
         try:
             log.info("closing server socket")
             self.server_socket.close()
-        except Exception as e:
+        except Exception as e: # pragma: no cover
             log.error(f"unable to close server socket: {e}")
 
         self.server_socket = None
 
-        if os.path.exists(self.socket_path):
-            try:
+        try:
+            if os.path.exists(self.socket_path):
                 os.remove(self.socket_path)
-            except Exception as e:
-                logging.error(f"unable to remove {self.socket_path}: {e}")
+        except Exception as e: # pragma: no cover
+            logging.error(f"unable to remove {self.socket_path}: {e}")
 
     def initialize_scanner(self):
         log.info("initializing scanner")
@@ -1387,7 +1387,7 @@ class YaraScannerWorker:
                 log.info("caught keyboard interrupt - exiting")
                 break
 
-            except Exception as e:
+            except Exception as e: # pragma: no cover
                 log.error(f"uncaught exception: {e} ({type(e)})")
                 self.shutdown_event.wait(1)
 
@@ -1413,6 +1413,9 @@ class YaraScannerWorker:
             # nothing came in while we were waiting (check for shutdown and try again)
             self.started_event.set()
             return
+        except Exception as e:
+            log.error(f"error waiting for connection: {e}")
+            return
 
         try:
             self.process_client(client_socket)
@@ -1421,7 +1424,7 @@ class YaraScannerWorker:
         finally:
             try:
                 client_socket.close()
-            except Exception as e:
+            except Exception as e: # pragma: no cover
                 log.error(f"unable to close client connection: {e}")
 
     def process_client(self, client_socket):
@@ -1684,15 +1687,6 @@ def read_n_bytes(s, n):
 
     return b"".join(_buffer)
 
-
-def read_data_block_size(s):
-    """Reads the size of the next data block from the given socket."""
-    size = struct.unpack("!I", read_n_bytes(s, 4))
-    size = size[0]
-    log.debug(f"read command block size {size}")
-    return size
-
-
 def read_data_block(s):
     """Reads the next data block from socket s. Returns the bytearray of the data portion of the block."""
     # read the size of the data block (4 byte network order integer)
@@ -1702,27 +1696,11 @@ def read_data_block(s):
     # read the data portion of the data block
     return read_n_bytes(s, size)
 
-
-def iterate_data_blocks(s):
-    """Reads the next data block until a block0 is read."""
-    while True:
-        block = read_data_block(s)
-        if len(block) == 0:
-            raise StopIteration()
-
-        yield block
-
-
 def send_data_block(s, data):
     """Writes the given data to the given socket as a data block."""
     message = b"".join([struct.pack("!I", len(data)), data])
     # log.debug("sending data block length {} ({})".format(len(message), message[:64]))
     s.sendall(message)
-
-
-def send_block0(s):
-    """Writes an empty data block to the given socket."""
-    send_data_block(s, b"")
 
 
 @dataclass
@@ -2013,5 +1991,5 @@ def main():  # pragma: no cover
     sys.exit(exit_result)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__": # pragma: no cover
     main()
