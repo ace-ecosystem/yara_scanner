@@ -1644,6 +1644,10 @@ class YaraScannerServer:
     def wait_for_stop(self, timeout: int = None):
         self.process_manager.join(timeout=timeout)
 
+    # added for backwards compat
+    def wait(self): # pramga: no cover
+        self.wait_for_stop()
+
 
 def _scan(
     command, data_or_file, ext_vars={}, base_dir=DEFAULT_BASE_DIR, socket_dir=DEFAULT_SOCKET_DIR, max_workers=None
