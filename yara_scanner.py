@@ -256,7 +256,7 @@ class YaraRuleDirectory:
                 continue
 
             if file_path not in self.tracked_files:
-                log.info(f"detected new yara file {file_path} in {self.dir_path}")
+                log.debug(f"detected new yara file {file_path} in {self.dir_path}")
                 # we use the directory path as the namespace for yara rules
                 self.tracked_files[file_path] = YaraRuleFile(file_path, namespace=self.dir_path)
 
