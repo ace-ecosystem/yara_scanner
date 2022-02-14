@@ -1544,21 +1544,40 @@ class YaraScannerServer:
         # if this is set to True then we use threading.Thread instead of multiprocessing.Process
         self.use_threads = use_threads
 
-        # set when the server has fully started
         if self.use_threads:
+            # set when the server has fully started
+            self.started_event = threading.Event()
+            # set when the server needs to shut down
             self.shutdown_event = threading.Event()
         else:  # pragma: no cover
+            self.started_event = multiprocessing.Event()
             self.shutdown_event = multiprocessing.Event()
 
     def execute(self):
+        def _handler(signum, frame):  # pragma: no cover
+            log.info("SIGNAL HANDLER CALLED")
+            self.sigterm = True
+
+        if not self.disable_signal_handling:  # pragma: no cover
+            signal.signal(signal.SIGTERM, _handler)
+
         while True:
             try:
                 self.execute_process_manager()
+                # if this is the first time then we wait for the workers to start
+                if not self.shutdown_event.is_set() and not self.started_event.is_set():
+                    for worker in self.workers:
+                        log.info(f"waiting for worker {worker} to start")
+                        worker.wait_for_start()
+
+                    # let controlling process know we started
+                    self.started_event.set()
+
                 self.shutdown_event.wait(1)
                 if self.shutdown_event.is_set():
                     break
 
-                if self.sigterm:
+                if self.sigterm:  # pragma: no cover
                     self.shutdown_event.set()
                     break
 
@@ -1607,19 +1626,21 @@ class YaraScannerServer:
                 log.info(f"started scanner on cpu {i} with pid {self.workers[i]}")
 
     def start(self):
-        def _handler(signum, frame):  # pragma: no cover
-            log.info("SIGNAL HANDLER CALLED")
-            self.sigterm = True
+        if self.use_threads:
+            self.process_manager = threading.Thread(name="Process Manager", target=self.execute)
+        else:  # pragma: no cover
+            self.process_manager = multiprocessing.Process(name="Process Manager", target=self.execute)
 
-        if not self.disable_signal_handling:  # pragma: no cover
-            signal.signal(signal.SIGTERM, _handler)
+        self.process_manager.start()
 
-        self.execute()
-        log.info("server exited")
+    def wait_for_start(self, timeout: int = None):
+        self.started_event.wait(timeout=timeout)
 
     def stop(self):
-        if not self.shutdown_event.is_set():
-            self.shutdown_event.set()
+        self.shutdown_event.set()
+
+    def wait_for_stop(self, timeout: int = None):
+        self.process_manager.join(timeout=timeout)
 
 
 def _scan(

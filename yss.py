@@ -218,9 +218,12 @@ def main():
 
     try:
         server.start()
+        server.wait_for_start()
+        server.wait_for_stop()
         print("yara scanner server stopped")
     except KeyboardInterrupt:
         server.stop()
+        server.wait_for_stop()
         print("yara scanner server stopped")
         sys.exit(0)
 
