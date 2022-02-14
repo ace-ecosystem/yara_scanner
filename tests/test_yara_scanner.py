@@ -457,6 +457,7 @@ def test_YaraRuleDirectory_update_existing_file(tmp_path):
     assert not (yara_rule_file.yara_rules[0] is yara_rule)
 
 
+@requires_git
 @pytest.mark.unit
 def test_get_current_repo_commit(tmp_path):
     rule_dir = tmp_path / "rules"
@@ -487,6 +488,7 @@ def test_get_current_repo_commit(tmp_path):
     assert current_commit != next_commit
 
 
+@requires_git
 @pytest.mark.unit
 def test_YaraRuleRepository_new(tmp_path):
     rule_dir = tmp_path / "rules"
@@ -502,6 +504,7 @@ def test_YaraRuleRepository_new(tmp_path):
     assert len(yara_repo.tracked_files) == 1
 
 
+@requires_git
 @pytest.mark.unit
 def test_YaraRuleRepository_rule_modified(tmp_path):
     rule_dir = tmp_path / "rules"
@@ -535,6 +538,7 @@ def test_YaraRuleRepository_rule_modified(tmp_path):
     assert not yara_rule.is_valid
 
 
+@requires_git
 @pytest.mark.unit
 def test_YaraRuleRepository_repo_broken(tmp_path):
     rule_dir = tmp_path / "rules"
@@ -812,6 +816,7 @@ def test_YaraScanner_get_unparsed_yara_rule_files(tmp_path):
     assert scanner.get_unparsed_yara_rule_files()
 
 
+@requires_git
 @pytest.mark.unit
 def test_YaraScanner_check_rules(tmp_path):
     # a single yara rule
