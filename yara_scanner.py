@@ -1638,12 +1638,16 @@ class YaraScannerServer:
                 getLogger().info(f"started scanner on cpu {i} with pid {self.workers[i]}")
 
     def start(self):
-        if self.use_threads:
-            self.process_manager = threading.Thread(name="Process Manager", target=self.execute)
-        else:  # pragma: no cover
-            self.process_manager = multiprocessing.Process(name="Process Manager", target=self.execute)
+        self.execute()
+        #if self.use_threads:
+            #self.process_manager = threading.Thread(name="Process Manager", target=self.execute)
+        #else:  # pragma: no cover
+            #self.process_manager = multiprocessing.Process(name="Process Manager", target=self.execute)
 
-        self.process_manager.start()
+        #self.process_manager.start()
+
+    def wait(self):
+        pass
 
     def wait_for_start(self, timeout: int = None):
         self.started_event.wait(timeout=timeout)
@@ -1652,7 +1656,8 @@ class YaraScannerServer:
         self.shutdown_event.set()
 
     def wait_for_stop(self, timeout: int = None):
-        self.process_manager.join(timeout=timeout)
+        pass
+        #self.process_manager.join(timeout=timeout)
 
 
 def _scan(
