@@ -162,14 +162,6 @@ def main():
         os.dup2(0, 1)
         os.dup2(0, 2)
 
-    sigterm = False
-
-    def handler(signum, frame):
-        nonlocal sigterm
-        sigterm = True
-
-    signal.signal(signal.SIGTERM, handler)
-
     server = YaraScannerServer(
         base_dir=args.base_dir, 
         signature_dir=args.signature_dir,
@@ -179,15 +171,11 @@ def main():
 
     try:
         server.start()
-        while not sigterm:
-            time.sleep(0.1)
-
-        server.stop()
         print("yara scanner server stopped")
-
     except KeyboardInterrupt:
         server.stop()
         print("yara scanner server stopped")
+        sys.exit(0)
 
 if __name__ == '__main__':
     main()

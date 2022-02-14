@@ -1360,6 +1360,7 @@ class YaraScannerWorker:
 
     def run(self):
         def _handler(signum, frame): # pragma: no cover
+            log.info("WORKER SIGNAL HANDLER")
             self.worker_shutdown.set()
 
         if not self.disable_signal_handling: # pragma: no cover
@@ -1378,9 +1379,11 @@ class YaraScannerWorker:
                 self.execute()
 
                 if self.worker_shutdown.is_set():
+                    log.info("worker shutdown")
                     break
 
                 if self.shutdown_event.is_set():
+                    log.info("server shutdown")
                     break
 
             except KeyboardInterrupt: # pragma: no cover
@@ -1392,6 +1395,7 @@ class YaraScannerWorker:
                 self.shutdown_event.wait(1)
 
         self.kill_server_socket()
+        log.info("worker exited")
 
     def execute(self):
         # are we listening on the socket yet?
@@ -1525,6 +1529,9 @@ class YaraScannerServer:
         # set to True when we receive a SIGUSR1
         self.sigusr1 = False
 
+        # set to True when we receive a SIGTERM
+        self.sigterm = False
+
         # save default timeout to use for scanner
         self.default_timeout = default_timeout
 
@@ -1546,21 +1553,28 @@ class YaraScannerServer:
         while True:
             try:
                 self.execute_process_manager()
+                self.shutdown_event.wait(1)
+                if self.shutdown_event.is_set():
+                    break
+
+                if self.sigterm:
+                    self.shutdown_event.set()
+                    break
+
             except KeyboardInterrupt: # pragma: no cover
                 log.info("got keyboard interrupt")
                 self.shutdown_event.set()
+                break
             except Exception as e: # pragma: no cover
                 log.error(f"uncaught exception: {e}")
-
-            self.shutdown_event.wait(1)
-            if self.shutdown_event.is_set():
-                break
+                time.sleep(1)
 
         # wait for all the scanners to die...
         for worker in self.workers:
             if worker:
                 log.info(f"waiting for scanner {worker} to exit...")
                 worker.stop()
+                worker.wait_for_stop()
 
         log.info("exiting")
 
@@ -1592,13 +1606,14 @@ class YaraScannerServer:
 
     def start(self):
         def _handler(signum, frame): # pragma: no cover
-            self.shutdown_event.set()
+            log.info("SIGNAL HANDLER CALLED")
+            self.sigterm = True
 
         if not self.disable_signal_handling: # pragma: no cover
             signal.signal(signal.SIGTERM, _handler)
-            signal.signal(signal.SIGINT, _handler)
 
         self.execute()
+        log.info("server exited")
 
     def stop(self):
         if not self.shutdown_event.is_set():
