@@ -2,7 +2,7 @@
 # vim: sw=4:ts=4:et:cc=120
 from __future__ import annotations
 
-__version__ = "1.9.9"
+__version__ = "1.9.10"
 __doc__ = """
 Yara Scanner
 ============
@@ -540,7 +540,11 @@ class YaraContext:
         self.sources = {namespace: "\n\n".join(sources) for namespace, sources in self.sources.items()}
 
         # the yara context
+        start = datetime.datetime.now()
         self.context = yara.compile(sources=self.sources)
+        end = datetime.datetime.now()
+        self.compile_time_ms = int((end - start).total_seconds() * 1000)
+        log.debug(f"context compiled in {self.compile_time_ms} ms")
 
     @property
     def is_valid(self) -> bool:
@@ -1292,6 +1296,9 @@ class YaraScannerWorker:
             self.worker_shutdown = multiprocessing.Event()
             self.started_event = multiprocessing.Event()
 
+    def __str__(self):
+        return f"YaraScannerWorker-{self.cpu_index}"
+
     def is_alive(self) -> bool:
         if self.process_thread is None:
             return True  # still initializing
@@ -1412,7 +1419,7 @@ class YaraScannerWorker:
 
         # get the next client connection
         try:
-            log.debug("waiting for client")
+            #log.debug("waiting for client")
             client_socket, _ = self.server_socket.accept()
             self.started_event.set()
         except socket.timeout as e:
@@ -1456,7 +1463,11 @@ class YaraScannerWorker:
             matches = False
             if command == COMMAND_FILE_PATH:
                 log.info(f"scanning file {data_or_file}")
+                start = datetime.datetime.now()
                 matches = self.scanner.scan(data_or_file, external_vars=ext_vars)
+                end = datetime.datetime.now()
+                total_ms = int((end - start).total_seconds() * 1000)
+                log.info(f"scanned file {data_or_file} in {total_ms} ms")
             elif command == COMMAND_DATA_STREAM:
                 log.info(f"scanning {len(data_or_file)} byte data stream")
                 matches = self.scanner.scan_data(data_or_file, external_vars=ext_vars)
@@ -1570,7 +1581,7 @@ class YaraScannerServer:
                     for worker in self.workers:
                         log.info(f"waiting for worker {worker} to start")
                         worker.wait_for_start()
-                        log.info(f"worker {worker} to started")
+                        log.info(f"worker {worker} started")
 
                     # let controlling process know we started
                     self.started_event.set()
