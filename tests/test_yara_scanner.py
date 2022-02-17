@@ -280,13 +280,24 @@ rule whoops {
 
 
 @pytest.mark.unit
-def test_YaraRuleFile_disable_plyara(tmp_path):
+def test_YaraRuleFile_disable_prefilter(tmp_path):
     rule_path = tmp_path / "test.yar"
     rule_path.write_text(_generate_yara_rule("test_rule"))
-    yara_rule_file = YaraRuleFile(rule_path, disable_plyara=True)
-    assert yara_rule_file.disable_plyara
+    yara_rule_file = YaraRuleFile(rule_path, disable_prefilter=True)
+    assert yara_rule_file.disable_prefilter
     # should not have any YaraRule objects loaded because they come from plyara parsing
     assert not yara_rule_file.yara_rules
+
+
+@pytest.mark.unit
+def test_YaraRuleFile_compiled_rule(tmp_path):
+    rule_path = tmp_path / "test.yar"
+    rule_path.write_text(_generate_yara_rule("test_rule"))
+    compiled_rules_dir = tmp_path / "compiled_rules"
+    compiled_rules_dir.mkdir()
+    yara_rule_file = YaraRuleFile(rule_path, compiled_rules_dir=str(compiled_rules_dir))
+    # second time uses the cache
+    yara_rule_file = YaraRuleFile(rule_path, compiled_rules_dir=str(compiled_rules_dir))
 
 
 @pytest.mark.unit
@@ -643,7 +654,7 @@ def test_YaraContext_yara_rule_modified(tmp_path):
 def test_YaraContext_yara_rule_file_modified(tmp_path):
     rule_file = tmp_path / "rule.yar"
     rule_file.write_text(_generate_yara_rule("test_rule"))
-    yara_rule_file = YaraRuleFile(str(rule_file), disable_plyara=True)
+    yara_rule_file = YaraRuleFile(str(rule_file), disable_prefilter=True)
     yara_context = YaraContext(yara_rule_files=[yara_rule_file])
     assert yara_context.is_valid
 
@@ -654,17 +665,50 @@ def test_YaraContext_yara_rule_file_modified(tmp_path):
 
 
 @pytest.mark.unit
-def test_YaraContext_yara_rule_file_missing(tmp_path):
+def test_YaraContext_compiled_rules_dir(tmp_path):
     rule_file = tmp_path / "rule.yar"
     rule_file.write_text(_generate_yara_rule("test_rule"))
-    yara_rule_file = YaraRuleFile(str(rule_file), disable_plyara=True)
-    yara_context = YaraContext(yara_rule_files=[yara_rule_file])
+    compiled_rules_dir = tmp_path / "compiled_rules"
+    compiled_rules_dir.mkdir()
+    yara_rule_file = YaraRuleFile(str(rule_file), disable_prefilter=True)
+    yara_context = YaraContext(yara_rule_files=[yara_rule_file], compiled_rules_dir=str(compiled_rules_dir))
     assert yara_context.is_valid
 
-    # yara rule file is modified
-    rule_file.unlink()
-    yara_rule_file.update()
-    assert not yara_context.is_valid
+    # same thing, should load compiled rules from cache
+    yara_context = YaraContext(yara_rule_files=[yara_rule_file], compiled_rules_dir=str(compiled_rules_dir))
+    assert yara_context.is_valid
+
+
+@pytest.mark.unit
+def test_YaraContext_compiled_rules_dir_corrupted_file(tmp_path):
+    rule_file = tmp_path / "rule.yar"
+    rule_file.write_text(_generate_yara_rule("test_rule"))
+    compiled_rules_dir = tmp_path / "compiled_rules"
+    compiled_rules_dir.mkdir()
+    yara_rule_file = YaraRuleFile(str(rule_file), disable_prefilter=True)
+    yara_context = YaraContext(yara_rule_files=[yara_rule_file], compiled_rules_dir=str(compiled_rules_dir))
+    assert yara_context.is_valid
+
+    # corrupt the compiled file
+    for compiled_file in os.listdir(str(compiled_rules_dir)):
+        compiled_file = compiled_rules_dir / compiled_file
+        compiled_file.write_text("corrupted")
+
+    # should still work and then over-write the corrupted file
+    yara_context = YaraContext(yara_rule_files=[yara_rule_file], compiled_rules_dir=str(compiled_rules_dir))
+    assert yara_context.is_valid
+
+
+@pytest.mark.unit
+def test_YaraContext_new(tmp_path):
+    rule_file = tmp_path / "rule.yar"
+    yara_source = _generate_yara_rule("test_rule")
+    rule_file.write_text(yara_source)
+    yara_rule_file = YaraRuleFile(str(rule_file))
+    yara_context = YaraContext(yara_rules=yara_rule_file.yara_rules)
+    # the source won't be exactly the same
+    assert len(yara_context.yara_rules) == 1
+    assert len(yara_context.yara_rule_files) == 0
 
 
 @pytest.mark.unit
@@ -811,8 +855,8 @@ def test_YaraScanner_get_unparsed_yara_rule_files(tmp_path):
     assert not scanner.get_unparsed_yara_rule_files()
 
     # should have one unparsed yara rules here
-    scanner = YaraScanner()
-    scanner.track_yara_file(str(rule_file), disable_plyara=True)
+    scanner = YaraScanner(disable_prefilter=True)
+    scanner.track_yara_file(str(rule_file))
     assert scanner.get_unparsed_yara_rule_files()
 
 

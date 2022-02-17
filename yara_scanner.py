@@ -57,6 +57,7 @@ import hashlib
 import tempfile
 from subprocess import PIPE, Popen
 from typing import Dict, List
+from pathlib import Path
 
 import plyara, plyara.utils
 import progress.bar
@@ -115,7 +116,6 @@ VALID_META_FILTERS = [
 
 yara.set_config(max_strings_per_rule=30720)
 log = logging.getLogger("yara-scanner")
-log.propagate = False
 
 
 def generate_context_key(rules: list[YaraRule]):
@@ -230,11 +230,16 @@ class Filterable:
 class YaraRuleDirectory:
     """A directory that contains yara rule files."""
 
-    def __init__(self, dir_path: str):
+    def __init__(self, dir_path: str, disable_prefilter: bool = False, compiled_rules_dir: str = None):
         # the path to the directory that contains the yara rules
         self.dir_path = dir_path
+        # if this is set then we disable prefiltering
+        self.disable_prefilter = disable_prefilter
+        # directory to store compiled rules into
+        self.compiled_rules_dir = compiled_rules_dir
         # map file path to yara rule file
         self.tracked_files = {}  # key = path, value = YaraRuleFile
+
         self.refresh()
 
     @property
@@ -258,7 +263,12 @@ class YaraRuleDirectory:
             if file_path not in self.tracked_files:
                 log.debug(f"detected new yara file {file_path} in {self.dir_path}")
                 # we use the directory path as the namespace for yara rules
-                self.tracked_files[file_path] = YaraRuleFile(file_path, namespace=self.dir_path)
+                self.tracked_files[file_path] = YaraRuleFile(
+                    file_path,
+                    namespace=self.dir_path,
+                    disable_prefilter=self.disable_prefilter,
+                    compiled_rules_dir=self.compiled_rules_dir,
+                )
 
     def update_existing_files(self):
         """Updates all tracked yara files."""
@@ -324,7 +334,9 @@ class YaraRuleRepository(YaraRuleDirectory):
 class YaraRuleFile:
     """A file that contains one or more yara rules."""
 
-    def __init__(self, file_path: str, namespace: str = None, disable_plyara: bool = False):
+    def __init__(
+        self, file_path: str, namespace: str = None, disable_prefilter: bool = False, compiled_rules_dir: str = None
+    ):
         # the path to the yara rule
         self.file_path = file_path
         # the contents of the yara file loaded into memory
@@ -334,18 +346,20 @@ class YaraRuleFile:
         # the namespace to use for these yara rules (optional)
         self.namespace = namespace if namespace else DEFAULT_NAMESPACE
         # set this to True to not use plyara (for filtering in advanced)
-        self.disable_plyara = disable_plyara
+        self.disable_prefilter = disable_prefilter
         # the last time the yara rule file was modified
         self.last_mtime = None
         # set to True if the file was deleted
         self.is_deleted = False
         # the list of YaraRule objects created from this file
-        # this may be empty if disable_plyara is True or plyara cannot parse the file
+        # this may be empty if disable_prefilter is True or plyara cannot parse the file
         self.yara_rules = []
         # this is set if the yara rules fail to compile with libyara
         self.compile_error = None
         # this is set if the yara rules fail to parse with plyara
         self.plyara_error = None
+        # directory to store compiled rules into
+        self.compiled_rules_dir = compiled_rules_dir
 
         # process the yara file
         self.update()
@@ -411,19 +425,38 @@ class YaraRuleFile:
         hasher.update(self.source.encode(errors="ignore"))
         self.source_sha256 = hasher.hexdigest()
 
-        try:
-            # verify that the source code compiles with libyara
-            yara.compile(source=self.source)
-        except Exception as e:
-            log.error(f"yara file {self.file_path} fails to compile: {e}")
-            self.compile_error = str(e)
-            return False
+        # have we already compiled this rule?
+        while True:
+            if self.compiled_rules_dir:
+                compiled_rule_path = os.path.join(self.compiled_rules_dir, self.source_sha256)
+                if os.path.exists(compiled_rule_path):
+                    break
+
+            try:
+                # verify that the source code compiles with libyara
+                test_context = yara.compile(source=self.source)
+                if self.compiled_rules_dir:
+                    compiled_rule_path = os.path.join(self.compiled_rules_dir, self.source_sha256)
+
+                    try:
+                        test_context.save(compiled_rule_path)
+                    except Exception as e:  # pragma: no cover
+                        log.warning(
+                            f"unable to save results of compiled yara file {self.file_path} to {compiled_rule_path}"
+                        )
+
+                break
+
+            except Exception as e:
+                log.error(f"yara file {self.file_path} fails to compile: {e}")
+                self.compile_error = str(e)
+                return False
 
         # remember the last time we loaded this rule from file
         self.last_mtime = os.path.getmtime(self.file_path)
 
         # if we are not using plyara then we are done here
-        if self.disable_plyara:
+        if self.disable_prefilter:
             return True
 
         try:
@@ -490,7 +523,12 @@ class YaraRule(Filterable):
 class YaraContext:
     """A compiled set of one or more yara rules or yara rule files."""
 
-    def __init__(self, yara_rules: list[YaraRule] = None, yara_rule_files: list[YaraRuleFile] = None):
+    def __init__(
+        self,
+        yara_rules: list[YaraRule] = None,
+        yara_rule_files: list[YaraRuleFile] = None,
+        compiled_rules_dir: str = None,
+    ):
         if yara_rules is None:
             yara_rules = []
 
@@ -539,12 +577,42 @@ class YaraContext:
         # for each namespace join the individual sources together with newlines
         self.sources = {namespace: "\n\n".join(sources) for namespace, sources in self.sources.items()}
 
+        # compute the sha256 of the combined source files
+        if compiled_rules_dir is not None:
+            hasher = hashlib.sha256()
+            for namespace in sorted(self.sources.keys()):
+                hasher.update(self.sources[namespace].encode(errors="ignore"))
+
+            self.sha256 = hasher.hexdigest()
+
+            # has this context already been created?
+            compiled_yara_path = os.path.join(compiled_rules_dir, self.sha256)
+            try:
+                if os.path.exists(compiled_yara_path):
+                    log.debug(f"loading compiled yara rules from {compiled_yara_path}")
+                    start = datetime.datetime.now()
+                    self.context = yara.load(compiled_yara_path)
+                    end = datetime.datetime.now()
+                    self.load_time_ms = int((end - start).total_seconds() * 1000)
+                    log.info(f"compiled yara rule loaded in {self.load_time_ms} ms")
+                    return
+            except Exception as e:
+                log.warning(f"unable to load compiled yara file {compiled_yara_path}: {e}")
+
         # the yara context
         start = datetime.datetime.now()
         self.context = yara.compile(sources=self.sources)
         end = datetime.datetime.now()
         self.compile_time_ms = int((end - start).total_seconds() * 1000)
-        log.debug(f"context compiled in {self.compile_time_ms} ms")
+        log.info(f"context compiled in {self.compile_time_ms} ms")
+
+        if compiled_rules_dir:
+            log.debug(f"saving compiled yara rules to {compiled_rules_dir}")
+            compiled_yara_path = os.path.join(compiled_rules_dir, self.sha256)
+            try:
+                self.context.save(compiled_yara_path)
+            except Exception as e:  # pragma: no cover
+                log.warning(f"unable to save compiled yara file {compiled_yara_path}: {e}")
 
     @property
     def is_valid(self) -> bool:
@@ -560,7 +628,8 @@ class YaraContext:
                 return False
 
             # is this yara rule now in an error state?
-            if yara_rule_file.is_error_state:
+            # this should never happen since contexts cannot be created from rules that do not compile
+            if yara_rule_file.is_error_state:  # pragma: no cover
                 return False
 
         return True
@@ -586,6 +655,7 @@ class YaraScanner(Filterable):
         default_timeout=DEFAULT_TIMEOUT,
         disable_prefilter=False,
         disable_postfilter=False,
+        compiled_rules_dir=None,
         *args,
         **kwargs,
     ):
@@ -623,6 +693,9 @@ class YaraScanner(Filterable):
         # if this is set then we disable postfiltering
         self.disable_postfilter = disable_postfilter
 
+        # optional directory to cache compiled yara rules
+        self.compiled_rules_dir = compiled_rules_dir
+
         # a convenience function to load yara rules stored in a commonly seen organization
         if signature_dir is not None:
             self.load_signature_directory(signature_dir)
@@ -659,7 +732,7 @@ class YaraScanner(Filterable):
         return [
             _
             for _ in self.all_yara_rule_files
-            if not _.is_error_state and (_.is_plyara_incompatible or _.disable_plyara)
+            if not _.is_error_state and (_.is_plyara_incompatible or _.disable_prefilter)
         ]
 
     def get_yara_context(self, file_path: str = None, mime_type: str = None) -> YaraContext:
@@ -685,7 +758,9 @@ class YaraScanner(Filterable):
             yara_context = self.yara_contexts[yara_context_key]
         except KeyError:
             yara_context = YaraContext(
-                yara_rules=filtered_yara_rules, yara_rule_files=self.get_unparsed_yara_rule_files()
+                yara_rules=filtered_yara_rules,
+                yara_rule_files=self.get_unparsed_yara_rule_files(),
+                compiled_rules_dir=self.compiled_rules_dir,
             )
             self.yara_contexts[yara_context_key] = yara_context
 
@@ -693,7 +768,9 @@ class YaraScanner(Filterable):
         if not yara_context.is_valid:
             # if not then recreate it
             yara_context = YaraContext(
-                yara_rules=filtered_yara_rules, yara_rule_files=self.get_unparsed_yara_rule_files()
+                yara_rules=filtered_yara_rules,
+                yara_rule_files=self.get_unparsed_yara_rule_files(),
+                compiled_rules_dir=self.compiled_rules_dir,
             )
             self.yara_contexts[yara_context_key] = yara_context
 
@@ -746,16 +823,21 @@ class YaraScanner(Filterable):
         """Returns True if git is available on the system, False otherwise."""
         return shutil.which("git")
 
-    def track_yara_file(self, file_path, *args, **kwargs):
+    def track_yara_file(self, file_path):
         """Adds a single yara file.  The file is then monitored for changes to mtime, removal or adding."""
         # are we already tracking this file?
         if file_path in self.tracked_files:
             return
 
-        self.tracked_files[file_path] = YaraRuleFile(file_path, *args, **kwargs)
+        self.tracked_files[file_path] = YaraRuleFile(
+            file_path,
+            namespace=None,
+            disable_prefilter=self.disable_prefilter,
+            compiled_rules_dir=self.compiled_rules_dir,
+        )
         log.debug(f"tracking yara file {file_path}")
 
-    def track_yara_dir(self, dir_path, *args, **kwargs):
+    def track_yara_dir(self, dir_path):
         """Adds all files in a given directory that end with .yar when converted to lowercase.
         All files are monitored for changes to mtime, as well as new and removed files."""
         if not os.path.isdir(dir_path):
@@ -766,10 +848,12 @@ class YaraScanner(Filterable):
         if dir_path in self.tracked_dirs:
             return
 
-        self.tracked_dirs[dir_path] = YaraRuleDirectory(dir_path, *args, **kwargs)
+        self.tracked_dirs[dir_path] = YaraRuleDirectory(
+            dir_path, disable_prefilter=self.disable_prefilter, compiled_rules_dir=self.compiled_rules_dir
+        )
         log.debug(f"tracking directory {dir_path} with {len(self.tracked_dirs[dir_path].tracked_files)} yara files")
 
-    def track_yara_repository(self, dir_path, *args, **kwargs):
+    def track_yara_repository(self, dir_path):
         """Adds all files in a given directory **that is a git repository** that end with .yar when converted to lowercase.  Only commits to the repository trigger rule reload."""
         if not self.git_available():  # pragma: no cover
             log.warning("git cannot be found: defaulting to track_yara_dir")
@@ -786,7 +870,9 @@ class YaraScanner(Filterable):
         if dir_path in self.tracked_repos:
             return False
 
-        self.tracked_repos[dir_path] = YaraRuleRepository(dir_path, *args, **kwargs)
+        self.tracked_repos[dir_path] = YaraRuleRepository(
+            dir_path, disable_prefilter=self.disable_prefilter, compiled_rules_dir=self.compiled_rules_dir
+        )
         log.debug(f"tracking git repo {dir_path} with {len(self.tracked_repos[dir_path].tracked_files)} yara files")
 
     def check_rules(self):
@@ -1139,10 +1225,14 @@ class YaraScanner(Filterable):
         yara_context = self.get_yara_context(file_path, mime_type=self.mime_type)
 
         # scan the file
+        start = datetime.datetime.now()
         if timeout == 0:
             yara_matches = yara_context.context.match(file_path, externals=default_external_vars)
         else:
             yara_matches = yara_context.context.match(file_path, externals=default_external_vars, timeout=timeout)
+        end = datetime.datetime.now()
+        total_ms = int((end - start).total_seconds() * 1000)
+        log.info(f"scanned file {file_path} in {total_ms} ms")
 
         return self.filter_scan_results(
             file_path, None, yara_matches, yara_stdout_file, yara_stderr_file, external_vars
@@ -1419,7 +1509,7 @@ class YaraScannerWorker:
 
         # get the next client connection
         try:
-            #log.debug("waiting for client")
+            # log.debug("waiting for client")
             client_socket, _ = self.server_socket.accept()
             self.started_event.set()
         except socket.timeout as e:
@@ -1656,7 +1746,7 @@ class YaraScannerServer:
         self.process_manager.join(timeout=timeout)
 
     # added for backwards compat
-    def wait(self): # pramga: no cover
+    def wait(self):  # pragma: no cover
         self.wait_for_stop()
 
 
@@ -1962,6 +2052,21 @@ def main():  # pragma: no cover
         help="Disable postfiltering.",
     )
 
+    parser.add_argument(
+        "-a",
+        "--auto-compile-rules",
+        default=False,
+        action="store_true",
+        help="""Automatically saved the compiled yara rules to disk.
+        Automatically loads pre-compiled rules based on SHA2 hash of rule
+        content.""",
+    )
+    parser.add_argument(
+        "--auto-compiled-rules-dir",
+        help="""Specifies the directory to use to store automatically compiled
+        yara rules. Defaults to the system temp dir.""",
+    )
+
     args = parser.parse_args()
 
     if (
@@ -1977,10 +2082,24 @@ def main():  # pragma: no cover
     logging.getLogger("plyara").setLevel(logging.ERROR)
     logging.basicConfig(level=log_levels[log_level])
 
+    compiled_rules_dir = None
+    if args.auto_compiled_rules_dir:
+        compiled_rules_dir = args.auto_compiled_rules_dir
+    elif args.auto_compile_rules and not args.auto_compiled_rules_dir:
+        compiled_rules_dir = os.path.join(str(Path.home()), ".yara_scanner")
+
+    if compiled_rules_dir:
+        os.makedirs(compiled_rules_dir, exist_ok=True)
+
+    # if we're checking the syntax then we don't want to do any pre-filtering
+    if args.compile_only:
+        args.disable_prefilter = True
+
     scanner = YaraScanner(
         signature_dir=args.signature_dir,
         disable_prefilter=args.disable_prefilter,
         disable_postfilter=args.disable_postfilter,
+        compiled_rules_dir=compiled_rules_dir,
     )
 
     for file_path in args.yara_rules:
@@ -2012,6 +2131,7 @@ def main():  # pragma: no cover
         sys.exit(0)
 
     if args.compile_only:
+        context = scanner.get_yara_context()
         sys.exit(0)
 
     exit_result = 0
