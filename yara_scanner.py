@@ -541,10 +541,10 @@ class YaraContext:
         assert all([isinstance(_, YaraRuleFile) for _ in yara_rule_files])
 
         # the list of yara rules that are part of this context
-        self.yara_rules = yara_rules
+        self.yara_rules = sorted(yara_rules, key=lambda x: x.parsed_rule['rule_name'])
 
         # the list of yara rule files that are also part of this context
-        self.yara_rule_files = yara_rule_files
+        self.yara_rule_files = sorted(yara_rule_files, key=lambda x: x.file_path)
 
         # remember hash of the content so we know when it changes
         # so we know when something changed
@@ -558,6 +558,7 @@ class YaraContext:
             if yara_rule.namespace not in self.sources:
                 self.sources[yara_rule.namespace] = []
 
+            # XXX rebuild_yara_rule may not be deterministic
             self.sources[yara_rule.namespace].append(plyara.utils.rebuild_yara_rule(yara_rule.parsed_rule))
             yara_rule_count += 1
 
@@ -569,7 +570,7 @@ class YaraContext:
             self.sources[yara_rule_file.namespace].append(yara_rule_file.source)
             yara_rule_file_count += 1
 
-        log.debug(f"context created with {yara_rule_count} parsed yara rules and {yara_rule_file_count} yara files")
+        log.debug(f"creating context with {yara_rule_count} parsed yara rules and {yara_rule_file_count} yara files")
 
         if not self.sources:
             log.warning("creating empty yara context")
@@ -578,7 +579,9 @@ class YaraContext:
         self.sources = {namespace: "\n\n".join(sources) for namespace, sources in self.sources.items()}
 
         # compute the sha256 of the combined source files
-        if compiled_rules_dir is not None:
+        # if we parsed out the yara rules then we don't do this because we cannot 
+        # deterministically rebuild the yara rules
+        if not self.yara_rules and compiled_rules_dir is not None:
             hasher = hashlib.sha256()
             for namespace in sorted(self.sources.keys()):
                 hasher.update(self.sources[namespace].encode(errors="ignore"))
@@ -594,7 +597,7 @@ class YaraContext:
                     self.context = yara.load(compiled_yara_path)
                     end = datetime.datetime.now()
                     self.load_time_ms = int((end - start).total_seconds() * 1000)
-                    log.info(f"compiled yara rule loaded in {self.load_time_ms} ms")
+                    log.debug(f"compiled yara rule loaded in {self.load_time_ms} ms")
                     return
             except Exception as e:
                 log.warning(f"unable to load compiled yara file {compiled_yara_path}: {e}")
@@ -606,7 +609,9 @@ class YaraContext:
         self.compile_time_ms = int((end - start).total_seconds() * 1000)
         log.info(f"context compiled in {self.compile_time_ms} ms")
 
-        if compiled_rules_dir:
+        # if we parsed out the yara rules then we don't do this because we cannot 
+        # deterministically rebuild the yara rules
+        if not self.yara_rules and compiled_rules_dir:
             log.debug(f"saving compiled yara rules to {compiled_rules_dir}")
             compiled_yara_path = os.path.join(compiled_rules_dir, self.sha256)
             try:
