@@ -2,7 +2,7 @@
 # vim: sw=4:ts=4:et:cc=120
 from __future__ import annotations
 
-__version__ = "1.9.11"
+__version__ = "2.0.0"
 __doc__ = """
 Yara Scanner
 ============
