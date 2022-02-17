@@ -1,7 +1,5 @@
-rule test {
+rule invalid_syntax {
     strings:
-        $a = "abc"
-
+        $ = "test"
     condition:
         any of them
-}
