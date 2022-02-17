@@ -2,7 +2,7 @@
 # vim: sw=4:ts=4:et:cc=120
 from __future__ import annotations
 
-__version__ = "1.9.10"
+__version__ = "1.9.11"
 __doc__ = """
 Yara Scanner
 ============
@@ -475,7 +475,7 @@ class YaraRuleFile:
                 self.yara_rules.append(YaraRule(rule, namespace=self.namespace))
 
         except Exception as e:
-            log.warning(f"failed to parse {self.file_path} with plyara: {e}")
+            log.debug(f"failed to parse {self.file_path} with plyara: {e}")
 
             #
             # when a file fails to be parsed with plyara we assume something is wrong with plyara
@@ -953,7 +953,7 @@ class YaraScanner(Filterable):
                     parser = plyara.Plyara()
                     parsed_rule_list = parser.parse_string(yara_rule_file.source)
                 except Exception as e:  # pragma: no cover
-                    log.warning(f"yara rule {yara_rule_file.file_path} is unparsable with plyara: {e}")
+                    log.debug(f"yara rule {yara_rule_file.file_path} is unparsable with plyara: {e}")
                     continue
             else:
                 # otherwise we can just use the parsing we did when we loaded the rules
@@ -1838,7 +1838,7 @@ def read_n_bytes(s, n):
 
     result = b"".join(_buffer)
     if len(result) != n:
-        log.warning(f"expected {n} bytes but read {len(result)}")
+        log.debug(f"expected {n} bytes but read {len(result)}")
 
     return b"".join(_buffer)
 
@@ -2069,7 +2069,7 @@ def main():  # pragma: no cover
     parser.add_argument(
         "--auto-compiled-rules-dir",
         help="""Specifies the directory to use to store automatically compiled
-        yara rules. Defaults to the system temp dir.""",
+        yara rules. Defaults to ~/.yara_scanner.""",
     )
 
     args = parser.parse_args()
