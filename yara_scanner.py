@@ -2,7 +2,7 @@
 # vim: sw=4:ts=4:et:cc=120
 from __future__ import annotations
 
-__version__ = "2.0.2"
+__version__ = "2.0.3"
 __doc__ = """
 Yara Scanner
 ============
@@ -33,6 +33,7 @@ A wrapper around the yara library for Python. ::
 import csv
 import datetime
 import functools
+import gc
 import io
 import json
 import logging
@@ -50,6 +51,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 
 from dataclasses import dataclass, Field
 from operator import itemgetter
@@ -100,7 +102,14 @@ DEFAULT_YARA_EXTERNALS = {
 DEFAULT_NAMESPACE = "DEFAULT"
 
 # the default timeout for scanning (in seconds)
-DEFAULT_TIMEOUT = 5
+DEFAULT_TIMEOUT = 10
+
+# the default maximum bytes of a file we're willing to scan
+# if you set this any higher you should also increase the default timeout
+DEFAULT_MAX_BYTES = 100 * 1024 * 1024 # 100 MB
+
+# how many yara contexts to keep in memory at one time
+DEFAULT_MAX_CONTEXTS = 5 
 
 META_FILTER_FILE_EXT = "file_ext"
 META_FILTER_FILE_NAME = "file_name"
@@ -528,6 +537,8 @@ class YaraContext:
         yara_rules: list[YaraRule] = None,
         yara_rule_files: list[YaraRuleFile] = None,
         compiled_rules_dir: str = None,
+        context_cache_dir: str = None,
+        max_contexts: int = DEFAULT_MAX_CONTEXTS,
     ):
         if yara_rules is None:
             yara_rules = []
@@ -539,6 +550,21 @@ class YaraContext:
         assert all([isinstance(_, YaraRule) for _ in yara_rules])
         assert isinstance(yara_rule_files, list)
         assert all([isinstance(_, YaraRuleFile) for _ in yara_rule_files])
+
+        if context_cache_dir:
+            # unique path for caching the context to disk
+            self.context_cache_path = os.path.join(context_cache_dir, str(uuid.uuid4()))
+            # how long an idle context lives until it gets flushed out (in seconds)
+            self.max_contexts = max_contexts
+            # when the context should be flushed out
+            self.context_flush_time = time.time() + self.max_contexts
+        else:
+            self.context_cache_path = None
+            self.max_contexts = None
+            self.context_flush_time = None
+
+        # reference to the actual context itself
+        self._context = None
 
         # the list of yara rules that are part of this context
         self.yara_rules = sorted(yara_rules, key=lambda x: x.parsed_rule["rule_name"])
@@ -552,39 +578,42 @@ class YaraContext:
         self.yara_rule_file_sha256 = {_.file_path: _.source_sha256 for _ in self.yara_rule_files}
 
         # generate the source for this yara rule context
-        self.sources = {}  # key = namespace, value = [] of rules
+        sources = {}  # key = namespace, value = [] of rules
         yara_rule_count = 0
         for yara_rule in self.yara_rules:
-            if yara_rule.namespace not in self.sources:
-                self.sources[yara_rule.namespace] = []
+            if yara_rule.namespace not in sources:
+                sources[yara_rule.namespace] = []
 
-            # XXX rebuild_yara_rule may not be deterministic
-            self.sources[yara_rule.namespace].append(plyara.utils.rebuild_yara_rule(yara_rule.parsed_rule))
+            # NOTE rebuild_yara_rule is not deterministic
+            sources[yara_rule.namespace].append(plyara.utils.rebuild_yara_rule(yara_rule.parsed_rule))
             yara_rule_count += 1
 
         yara_rule_file_count = 0
         for yara_rule_file in self.yara_rule_files:
-            if yara_rule_file.namespace not in self.sources:
-                self.sources[yara_rule_file.namespace] = []
+            if yara_rule_file.namespace not in sources:
+                sources[yara_rule_file.namespace] = []
 
-            self.sources[yara_rule_file.namespace].append(yara_rule_file.source)
+            sources[yara_rule_file.namespace].append(yara_rule_file.source)
             yara_rule_file_count += 1
 
         log.debug(f"creating context with {yara_rule_count} parsed yara rules and {yara_rule_file_count} yara files")
 
-        if not self.sources:
+        if not sources:
             log.warning("creating empty yara context")
 
         # for each namespace join the individual sources together with newlines
-        self.sources = {namespace: "\n\n".join(sources) for namespace, sources in self.sources.items()}
+        sources = {namespace: "\n\n".join(yara_sources) for namespace, yara_sources in sources.items()}
+
+        # the last time this context was used to scan
+        self.last_used = time.time()
 
         # compute the sha256 of the combined source files
         # if we parsed out the yara rules then we don't do this because we cannot
         # deterministically rebuild the yara rules
         if not self.yara_rules and compiled_rules_dir is not None:
             hasher = hashlib.sha256()
-            for namespace in sorted(self.sources.keys()):
-                hasher.update(self.sources[namespace].encode(errors="ignore"))
+            for namespace in sorted(sources.keys()):
+                hasher.update(sources[namespace].encode(errors="ignore"))
 
             self.sha256 = hasher.hexdigest()
 
@@ -594,7 +623,7 @@ class YaraContext:
                 if os.path.exists(compiled_yara_path):
                     log.debug(f"loading compiled yara rules from {compiled_yara_path}")
                     start = datetime.datetime.now()
-                    self.context = yara.load(compiled_yara_path)
+                    self._context = yara.load(compiled_yara_path)
                     end = datetime.datetime.now()
                     self.load_time_ms = int((end - start).total_seconds() * 1000)
                     log.debug(f"compiled yara rule loaded in {self.load_time_ms} ms")
@@ -602,12 +631,20 @@ class YaraContext:
             except Exception as e:
                 log.warning(f"unable to load compiled yara file {compiled_yara_path}: {e}")
 
-        # the yara context
+        # build the yara context
         start = datetime.datetime.now()
-        self.context = yara.compile(sources=self.sources)
+        self._context = yara.compile(sources=sources)
         end = datetime.datetime.now()
         self.compile_time_ms = int((end - start).total_seconds() * 1000)
         log.info(f"context compiled in {self.compile_time_ms} ms")
+
+        # if we are using a cache for yara contexts then we go ahead and save the context
+        if self.context_cache_path:
+            try:
+                self._context.save(self.context_cache_path)
+            except Exception as e: # pragma: no cover
+                log.warning(f"unable to cache context to {self.context_cache_path}: {e}")
+                self.context_cache_path = None
 
         # if we parsed out the yara rules then we don't do this because we cannot
         # deterministically rebuild the yara rules
@@ -615,9 +652,69 @@ class YaraContext:
             log.debug(f"saving compiled yara rules to {compiled_rules_dir}")
             compiled_yara_path = os.path.join(compiled_rules_dir, self.sha256)
             try:
-                self.context.save(compiled_yara_path)
+                self._context.save(compiled_yara_path)
             except Exception as e:  # pragma: no cover
                 log.warning(f"unable to save compiled yara file {compiled_yara_path}: {e}")
+
+    @property
+    def context(self):
+        """Returns the yara context for scanning. Loads from disk if the context has been flushed.
+        Updates the context flush time."""
+        # is context flushing not enabled?
+        if not self.context_cache_path:
+            return self._context
+
+        # has the context been flushed out?
+        if self._context is None:
+            try:
+                # load it back in
+                self._context = yara.load(self.context_cache_path)
+                log.info(f"loaded flushed context {self.context_cache_path}")
+            except Exception as e:
+                log.error(f"unable to load flushed context cache from {self.context_cache_path}: {e}")
+                return None
+
+        # reset the clock on the flush time
+        self.last_used = time.time()
+        return self._context
+
+    def flush_context(self):
+        """Deletes the yara context from memory."""
+        # NOTE The current version of libyara (4.0.5) does not actually free the memory it uses.
+        # But it does seem to re-use memory it has already allocated.
+
+        # is context flushing not enabled?
+        if not self.context_cache_path:
+            return
+
+        # is the context already flushed out?
+        if not self._context:
+            return
+
+        # is it time to flush the context out?
+        log.info(f"flushing yara context {self.context_cache_path}")
+        self._context = None
+        gc.collect() # this needs to happen right away (maybe?)
+
+    @property
+    def is_flushed(self):
+        """Returns True if the yara context has been flushed."""
+        if not self.context_cache_path:
+            return False
+
+        return self._context is None
+
+    def delete_context_cache(self):
+        """Deletes the context cache if it exists."""
+        # is context flushing not enabled?
+        if not self.context_cache_path:
+            return
+
+        try:
+            if os.path.exists(self.context_cache_path):
+                os.unlink(self.context_cache_path)
+        except Exception as e: # pragma: no cover
+            log.warning(f"unable to delete context cache {self.context_cache_path}: {e}")
 
     @property
     def is_valid(self) -> bool:
@@ -661,6 +758,9 @@ class YaraScanner(Filterable):
         disable_prefilter=False,
         disable_postfilter=False,
         compiled_rules_dir=None,
+        context_cache_dir=None,
+        max_contexts=DEFAULT_MAX_CONTEXTS,
+        max_bytes=DEFAULT_MAX_BYTES,
         *args,
         **kwargs,
     ):
@@ -689,6 +789,9 @@ class YaraScanner(Filterable):
         # the default amount of time (in seconds) a yara scan is allowed to take before it fails
         self.default_timeout = default_timeout
 
+        # the maximum number of bytes to scan
+        self.max_bytes = max_bytes
+
         # the dictionary of yara contexts to use for given rulesets
         self.yara_contexts = {}  # key = generate_context_key(), value = compiled yara context
 
@@ -704,6 +807,30 @@ class YaraScanner(Filterable):
         # a convenience function to load yara rules stored in a commonly seen organization
         if signature_dir is not None:
             self.load_signature_directory(signature_dir)
+
+        # the directory to store cached yara contexts
+        self.context_cache_dir = context_cache_dir
+        if self.context_cache_dir:
+            if not os.path.exists(self.context_cache_dir):
+                os.mkdir(self.context_cache_dir)
+
+        # how long a yara context will last until it is flushed out of memory (in second)
+        self.max_contexts = max_contexts
+
+        # the number of context requests
+        self.context_cache_requests = 0
+
+        # the number of times we hit a cached context
+        self.context_cache_hit = 0
+
+        # the number of times a context was found invalid
+        self.context_cache_invalid = 0
+
+        # the number of times we created a new context
+        self.context_creation_count = 0
+
+        # the number of times a context expired
+        self.context_expiration_count = 0
 
     def load_signature_directory(self, signature_dir: str):
         """Loads a "signature directory".
@@ -744,6 +871,9 @@ class YaraScanner(Filterable):
         """Returns the yara context to use for the given file.
         If a file is not specified, the default context is returned which contains all available rules."""
         # figure out which rules match which filters for teh given file
+
+        self.context_cache_requests += 1
+
         filtered_yara_rules = []
         for yara_rule_file in self.all_yara_rule_files:
             for yara_rule in yara_rule_file.yara_rules:
@@ -761,25 +891,50 @@ class YaraScanner(Filterable):
         try:
             # do we already have this compiled?
             yara_context = self.yara_contexts[yara_context_key]
+            self.context_cache_hit += 1
         except KeyError:
             yara_context = YaraContext(
                 yara_rules=filtered_yara_rules,
                 yara_rule_files=self.get_unparsed_yara_rule_files(),
                 compiled_rules_dir=self.compiled_rules_dir,
+                context_cache_dir=self.context_cache_dir,
+                max_contexts=self.max_contexts,
             )
             self.yara_contexts[yara_context_key] = yara_context
+            log.info(f"created new context - current count {len(self.yara_contexts)}")
+            self.context_creation_count += 1
 
         # is this yara context still valid?
         if not yara_context.is_valid:
-            # if not then recreate it
+            # delete the cache file if it exists
+            yara_context.delete_context_cache()
+            # recreate the context with the new rules
             yara_context = YaraContext(
                 yara_rules=filtered_yara_rules,
                 yara_rule_files=self.get_unparsed_yara_rule_files(),
                 compiled_rules_dir=self.compiled_rules_dir,
+                context_cache_dir=self.context_cache_dir,
+                max_contexts=self.max_contexts,
             )
             self.yara_contexts[yara_context_key] = yara_context
+            log.info(f"replaced context - current count {len(self.yara_contexts)}")
+            self.context_creation_count += 1
+            self.context_cache_invalid += 1
 
         return yara_context
+
+    def manage_yara_contexts(self):
+        """Manages yara contexts by expiring ones not used in some time."""
+        # sort the contexts by the last time they were used
+        sorted_contexts = sorted(self.yara_contexts.values(), key=lambda c: c.last_used, reverse=True)
+        # flush all contexts except for the first N
+        for context in sorted_contexts[self.max_contexts:]:
+            context.flush_context()
+
+    def clear_yara_contexts(self):
+        """Clears all yara contexts. Ensures all cache files are deleted."""
+        for context in self.yara_contexts.values():
+            context.delete_context_cache()
 
     @property
     def scan_results(self):
@@ -1229,15 +1384,35 @@ class YaraScanner(Filterable):
         log.debug(f"got mime type {self.mime_type} for {file_path}")
         yara_context = self.get_yara_context(file_path, mime_type=self.mime_type)
 
+        match_arguments = {
+            "externals": default_external_vars
+        }
+
+        if timeout != 0:
+            match_arguments["timeout"] = timeout
+
+        # is the file too large?
+        file_path_size = os.path.getsize(file_path)
+        if file_path_size > self.max_bytes:
+            log.info(f"file {file_path} too large ({file_path_size} bytes) -- using first {self.max_bytes} bytes")
+            # read the first N bytes and pass that directly 
+            with open(file_path, 'rb') as fp:
+                match_arguments["data"] = fp.read(self.max_bytes)
+        else:
+            match_arguments["filepath"] = file_path
+
         # scan the file
         start = datetime.datetime.now()
-        if timeout == 0:
-            yara_matches = yara_context.context.match(file_path, externals=default_external_vars)
-        else:
-            yara_matches = yara_context.context.match(file_path, externals=default_external_vars, timeout=timeout)
+        yara_matches = yara_context.context.match(**match_arguments)
         end = datetime.datetime.now()
         total_ms = int((end - start).total_seconds() * 1000)
         log.info(f"scanned file {file_path} in {total_ms} ms")
+
+        self.manage_yara_contexts()
+        log.info(
+            f"cache size: [{len(self.yara_contexts)}] "
+            f"flushed size: [{len([_ for _ in self.yara_contexts.values() if _.is_flushed])}]"
+        )
 
         return self.filter_scan_results(
             file_path, None, yara_matches, yara_stdout_file, yara_stderr_file, external_vars
@@ -1267,9 +1442,15 @@ class YaraScanner(Filterable):
 
         # scan the data stream
         if timeout == 0:
-            yara_matches = yara_context.context.match(data=data, externals=external_vars)
+            yara_matches = yara_context.context.match(data=data[:self.max_bytes], externals=external_vars)
         else:
-            yara_matches = yara_context.context.match(data=data, externals=external_vars, timeout=timeout)
+            yara_matches = yara_context.context.match(data=data[:self.max_bytes], externals=external_vars, timeout=timeout)
+
+        self.manage_yara_contexts()
+        log.info(
+            f"cache size: [{len(self.yara_contexts)}] "
+            f"flushed size: [{len([_ for _ in self.yara_contexts.values() if _.is_flushed])}]"
+        )
 
         return self.filter_scan_results(None, data, yara_matches, yara_stdout_file, yara_stderr_file, external_vars)
 
@@ -1360,11 +1541,15 @@ class YaraScannerWorker:
         socket_dir=DEFAULT_SOCKET_DIR,
         update_frequency=60,
         backlog=50,
-        default_timeout=5,
+        default_timeout=DEFAULT_TIMEOUT,
+        max_bytes=DEFAULT_MAX_BYTES,
         disable_signal_handling=False,
+        disable_prefilter=False,
         use_threads=False,
         shutdown_event=None,
         cpu_index=None,
+        context_cache_dir=None,
+        max_contexts=DEFAULT_MAX_CONTEXTS,
     ):
         self.base_dir = base_dir
         self.signature_dir = signature_dir
@@ -1372,10 +1557,14 @@ class YaraScannerWorker:
         self.update_frequency = update_frequency
         self.backlog = backlog
         self.default_timeout = default_timeout
+        self.max_bytes = max_bytes
         self.disable_signal_handling = disable_signal_handling
+        self.disable_prefilter = disable_prefilter
         self.use_threads = use_threads
         self.shutdown_event = shutdown_event
         self.cpu_index = cpu_index
+        self.context_cache_dir = context_cache_dir
+        self.max_contexts = max_contexts
 
         # the next time we need to update the yara rules
         self.next_rule_update_time = time.time() + self.update_frequency
@@ -1460,7 +1649,14 @@ class YaraScannerWorker:
 
     def initialize_scanner(self):
         log.info("initializing scanner")
-        self.scanner = YaraScanner(signature_dir=self.signature_dir, default_timeout=self.default_timeout)
+        self.scanner = YaraScanner(
+            signature_dir=self.signature_dir,
+            default_timeout=self.default_timeout,
+            max_bytes=self.max_bytes,
+            context_cache_dir=self.context_cache_dir,
+            max_contexts=self.max_contexts,
+            disable_prefilter=self.disable_prefilter,
+        )
 
     def run(self):
         def _handler(signum, frame):  # pragma: no cover
@@ -1499,6 +1695,7 @@ class YaraScannerWorker:
                 self.shutdown_event.wait(1)
 
         self.kill_server_socket()
+        self.scanner.clear_yara_contexts()
         log.info("worker exited")
 
     def execute(self):
@@ -1591,10 +1788,14 @@ class YaraScannerServer:
         socket_dir=DEFAULT_SOCKET_DIR,
         update_frequency=60,
         backlog=50,
-        default_timeout=5,
+        default_timeout=DEFAULT_TIMEOUT,
+        max_bytes=DEFAULT_MAX_BYTES,
         max_workers=None,
         disable_signal_handling=False,
         use_threads=False,
+        disable_prefilter=False,
+        context_cache_dir=None,
+        max_contexts=DEFAULT_MAX_CONTEXTS,
     ):
         # primary scanner controller
         self.process_manager = None
@@ -1602,6 +1803,9 @@ class YaraScannerServer:
         # list of YaraScannerServer Process objects
         # there will be one per cpu available as returned by max_workers or multiprocessing.cpu_count()
         self.workers = [None for _ in range(multiprocessing.cpu_count() if max_workers is None else max_workers)]
+
+        self.context_cache_dir = context_cache_dir
+        self.max_contexts = max_contexts
 
         # base directory of yara scanner
         self.base_dir = base_dir
@@ -1642,6 +1846,12 @@ class YaraScannerServer:
 
         # save default timeout to use for scanner
         self.default_timeout = default_timeout
+
+        # the maximum number of bytes to scan for a single file
+        self.max_bytes = max_bytes
+
+        # disable pre-filtering capabilities
+        self.disable_prefilter = disable_prefilter
 
         # test support functions
         # disable signal handling
@@ -1724,10 +1934,14 @@ class YaraScannerServer:
                     update_frequency=self.update_frequency,
                     backlog=self.backlog,
                     default_timeout=self.default_timeout,
+                    max_bytes=self.max_bytes,
                     disable_signal_handling=self.disable_signal_handling,
+                    disable_prefilter=self.disable_prefilter,
                     use_threads=self.use_threads,
                     shutdown_event=self.shutdown_event,
                     cpu_index=i,
+                    context_cache_dir=self.context_cache_dir,
+                    max_contexts=self.max_contexts,
                 )
 
                 self.workers[i].start()
@@ -2072,6 +2286,22 @@ def main():  # pragma: no cover
         yara rules. Defaults to ~/.yara_scanner.""",
     )
 
+    # resource constraints
+    parser.add_argument(
+        "-T",
+        "--timeout",
+        default=DEFAULT_TIMEOUT,
+        type=int,
+        help="""Maximum amount of time (in seconds) a single scan is allowed to take.
+        Passed directly to libyara.""")
+
+    parser.add_argument(
+        "-M",
+        "--max-bytes",
+        default=DEFAULT_MAX_BYTES,
+        type=int,
+        help="""Only the first N bytes of a file are scanned.""")
+
     args = parser.parse_args()
 
     if (
@@ -2102,9 +2332,11 @@ def main():  # pragma: no cover
 
     scanner = YaraScanner(
         signature_dir=args.signature_dir,
+        default_timeout=args.timeout,
         disable_prefilter=not args.enable_prefilter,
         disable_postfilter=args.disable_postfilter,
         compiled_rules_dir=compiled_rules_dir,
+        max_bytes=args.max_bytes,
     )
 
     for file_path in args.yara_rules:
@@ -2136,7 +2368,7 @@ def main():  # pragma: no cover
         sys.exit(0)
 
     if args.compile_only:
-        context = scanner.get_yara_context()
+        context - scanner.get_yara_context()
         sys.exit(0)
 
     exit_result = 0

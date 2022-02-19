@@ -632,7 +632,7 @@ def test_YaraContext_new_from_file(tmp_path):
     yara_rule_file = YaraRuleFile(str(rule_file))
     yara_context = YaraContext(yara_rule_files=[yara_rule_file])
     # the source should be exactly the same
-    assert yara_context.sources[DEFAULT_NAMESPACE] == yara_source
+    #assert yara_context.sources[DEFAULT_NAMESPACE] == yara_source
     assert len(yara_context.yara_rules) == 0
     assert len(yara_context.yara_rule_files) == 1
 
@@ -700,15 +700,47 @@ def test_YaraContext_compiled_rules_dir_corrupted_file(tmp_path):
 
 
 @pytest.mark.unit
-def test_YaraContext_new(tmp_path):
+def test_YaraContext_context_cache(tmp_path):
     rule_file = tmp_path / "rule.yar"
     yara_source = _generate_yara_rule("test_rule")
     rule_file.write_text(yara_source)
     yara_rule_file = YaraRuleFile(str(rule_file))
-    yara_context = YaraContext(yara_rules=yara_rule_file.yara_rules)
-    # the source won't be exactly the same
-    assert len(yara_context.yara_rules) == 1
-    assert len(yara_context.yara_rule_files) == 0
+    context_cache_dir = tmp_path / "contexts"
+    context_cache_dir.mkdir()
+    yara_context = YaraContext(yara_rule_files=[yara_rule_file], context_cache_dir=str(context_cache_dir), max_contexts=1)
+
+    # cached context file should exit
+    assert yara_context.context_cache_path
+    assert os.path.exists(yara_context.context_cache_path)
+
+    old_time = yara_context.last_used
+    assert old_time
+
+    # this should be OK
+    assert yara_context.context
+
+    # time should update
+    assert yara_context.last_used >= old_time
+
+    yara_context.flush_context()
+    assert yara_context._context is None
+    assert yara_context.is_flushed
+
+    # flush twice is OK
+    yara_context.flush_context()
+
+    # this should load from disk
+    assert yara_context.context
+    assert yara_context._context is not None
+    assert not yara_context.is_flushed
+
+    # delete the context cache
+    yara_context.delete_context_cache()
+    assert not os.path.exists(yara_context.context_cache_path)
+
+    # should return None now
+    yara_context.flush_context()
+    assert yara_context.context is None
 
 
 @pytest.mark.unit
@@ -719,6 +751,13 @@ def test_YaraScanner_new():
     assert not scanner.tracked_repos
     assert scanner.default_timeout == DEFAULT_TIMEOUT
     assert not scanner.yara_contexts
+
+
+@pytest.mark.unit
+def test_YaraScanner_new_context_cache_dir(tmp_path):
+    context_cache_dir = tmp_path / "contexts"
+    scanner = YaraScanner(context_cache_dir=str(context_cache_dir))
+    assert os.path.isdir(str(context_cache_dir))
 
 
 @pytest.mark.unit
@@ -937,6 +976,65 @@ def test_YaraScanner_get_yara_context(tmp_path):
     # we should have a different context now
     assert not (scanner.get_yara_context(str(scan_target)) is context)
 
+@pytest.mark.unit
+def test_YaraScanner_get_yara_context_caching(tmp_path):
+    bas_rule_path = tmp_path / "bas_rule.yar"
+    bas_rule_path.write_text("""
+    rule test_bas {
+        meta:
+            file_ext = "bas"
+        strings:
+            $ = "test"
+        condition:
+            any of them
+    }""")
+
+    exe_rule_path = tmp_path / "exe_rule.yar"
+    exe_rule_path.write_text("""
+    rule test_exe {
+        meta:
+            file_ext = "exe"
+        strings:
+            $ = "test"
+        condition:
+            any of them
+    }""")
+
+    context_cache_dir = tmp_path / "contexts"
+    context_cache_dir.mkdir()
+
+    scanner = YaraScanner(context_cache_dir=str(context_cache_dir), max_contexts=1)
+    scanner.track_yara_file(bas_rule_path)
+    scanner.track_yara_file(exe_rule_path)
+
+    bas_scan_target = tmp_path / "target.bas"
+    bas_scan_target.write_text("test")
+
+    exe_scan_target = tmp_path / "target.exe"
+    exe_scan_target.write_text("test")
+
+    # scanner should not have any contexts yet
+    assert not scanner.yara_contexts
+
+    # scan the files
+    assert scanner.scan(str(bas_scan_target))
+    assert scanner.scan(str(exe_scan_target))
+
+    # should have two contexts
+    assert len(scanner.yara_contexts) == 2
+
+    bas_context = scanner.get_yara_context(str(bas_scan_target))
+    exe_context = scanner.get_yara_context(str(exe_scan_target))
+
+    # exe context should be available but bas should be flushed out
+    assert bas_context.is_flushed
+    assert not exe_context.is_flushed
+
+    # scan bas file again
+    assert scanner.scan(str(bas_scan_target))
+    assert not bas_context.is_flushed
+    assert exe_context.is_flushed
+
 
 @pytest.mark.unit
 def test_YaraScanner_get_yara_context_empty(tmp_path):
@@ -946,7 +1044,7 @@ def test_YaraScanner_get_yara_context_empty(tmp_path):
     context = scanner.get_yara_context(str(scan_target))
     assert context is not None
     assert context.context is not None
-    assert not context.sources
+    #assert not context.sources
 
 
 @pytest.mark.unit
@@ -963,7 +1061,7 @@ def test_YaraScanner_get_yara_context_invalid_syntax_fixed(tmp_path):
     # get the initial context for this file
     bad_context = scanner.get_yara_context(str(scan_target))
     # nothing should actually be loaded
-    assert not bad_context.sources
+    #assert not bad_context.sources
 
     # fix the rule
     rule_path.write_text(_generate_yara_rule("test_rule"))
@@ -974,7 +1072,7 @@ def test_YaraScanner_get_yara_context_invalid_syntax_fixed(tmp_path):
     assert not (good_context is bad_context)
 
     # and should have rules loaded
-    assert good_context.sources
+    #assert good_context.sources
 
 
 @pytest.mark.parametrize("timeout", [None, 0])
@@ -991,6 +1089,19 @@ def test_YaraScanner_scan(timeout, tmp_path):
 
     assert scanner.scan(str(scan_target), timeout=timeout)
 
+@pytest.mark.unit
+def test_YaraScanner_scan_max_size(tmp_path):
+    rule_path = tmp_path / "test_rule.yar"
+    rule_path.write_text(_generate_yara_rule("test_rule", search="hello world"))
+
+    scan_target = tmp_path / "target.txt"
+    scan_target.write_text("hello world")
+
+    scanner = YaraScanner(max_bytes=1)
+    scanner.track_yara_file(str(rule_path))
+
+    # this should not match because we only scan the first byte of the file
+    assert not scanner.scan(str(scan_target))
 
 @pytest.mark.parametrize("timeout", [None, 0])
 @pytest.mark.unit
