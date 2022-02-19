@@ -24,6 +24,15 @@ def main():
         help="Read the list of files to scan from stdin.",
     )
     parser.add_argument(
+        "-m",
+        "--max-workers",
+        required=False,
+        default=None,
+        type=int,
+        dest="max_workers",
+        help="Specify the maximum number of workers. Defaults to the local cpu count.",
+    )
+    parser.add_argument(
         "-j",
         "--dump-json",
         required=False,
